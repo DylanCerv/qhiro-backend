@@ -1,0 +1,8 @@
+{
+  "watch": ["src", ".env"],
+  "ext": "ts,json,env",
+  "ignore": ["dist", "node_modules"],
+  "exec": "node --import tsx src/index.ts",
+  "signal": "SIGINT",
+  "delay": 500
+}
