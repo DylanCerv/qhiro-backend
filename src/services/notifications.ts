@@ -9,6 +9,8 @@ interface NotificationPayload {
   npkFormula?: { nitrogen: number; phosphorus: number; potassium: number };
   deviceId?: string;
   batteryLevel?: number;
+  actionId?: string;
+  status?: string;
 }
 
 const EVENT_TITLES: Record<NotificationEvent, string> = {

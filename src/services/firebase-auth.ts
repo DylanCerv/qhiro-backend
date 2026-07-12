@@ -11,7 +11,6 @@ function mapAuthError(message: string): string {
     message.includes('CONFIGURATION_NOT_FOUND') ||
     message.includes('no configuration corresponding')
   ) {
-    console.log('message', message);
     return [
       'Firebase Authentication is not ready.',
       '1) Open Firebase Console → Authentication → Get started.',
@@ -57,8 +56,6 @@ async function identityRequest(
     email?: string;
     idToken?: string;
   };
-
-  console.log('data', data);
 
   if (data.error?.message) {
     throw new Error(mapAuthError(data.error.message));

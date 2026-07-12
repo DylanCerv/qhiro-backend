@@ -1,17 +1,94 @@
 import { randomUUID } from 'node:crypto';
-import type { AiAnalysisRequest } from '../types/index.js';
+import type {
+  AiAnalysisRequest,
+  AiAnalysisResponse,
+  Device,
+  TelemetryProcessingLog,
+  TelemetryProcessingStatus,
+} from '../types/index.js';
 import { requestAiAnalysis } from './ai-client.js';
 import { applyDecisionEngine } from './decision-engine.js';
 import {
+  getDevice,
+  getFlight,
   getParcel,
+  saveTelemetryProcessingLog,
   updateFlight,
   upsertDevice,
   upsertParcel,
 } from './firebase.js';
 import { sendNotification } from './notifications.js';
 
-export async function handleDroneTelemetry(data: Record<string, unknown>): Promise<void> {
-  const userId = String(data.userId ?? '');
+interface TelemetryContext {
+  userId: string;
+  deviceId: string;
+  deviceType: Device['type'];
+}
+
+interface TelemetryLogInput {
+  ctx: TelemetryContext;
+  payload: Record<string, unknown>;
+  startedAt: number;
+  status: TelemetryProcessingStatus;
+  actions?: string[];
+  validationMessage?: string;
+  aiRequest?: AiAnalysisRequest;
+  aiResponse?: AiAnalysisResponse;
+}
+
+async function saveProcessingLog(input: TelemetryLogInput): Promise<void> {
+  const log: TelemetryProcessingLog = {
+    logId: randomUUID(),
+    userId: input.ctx.userId,
+    deviceId: input.ctx.deviceId,
+    deviceType: input.ctx.deviceType,
+    parcelId: typeof input.payload.parcelId === 'string' ? input.payload.parcelId : undefined,
+    flightId: typeof input.payload.flightId === 'string' ? input.payload.flightId : undefined,
+    status: input.status,
+    validationMessage: input.validationMessage,
+    payload: input.payload,
+    aiRequest: input.aiRequest,
+    aiResponse: input.aiResponse,
+    actions: input.actions ?? [],
+    durationMs: Date.now() - input.startedAt,
+    createdAt: new Date().toISOString(),
+  };
+  await saveTelemetryProcessingLog(log);
+}
+
+async function validateRegisteredDevice(ctx: TelemetryContext): Promise<Device | null> {
+  const device = await getDevice(ctx.userId, ctx.deviceId);
+  if (!device) {
+    console.warn(`[Telemetry] Unknown device "${ctx.deviceId}" for user "${ctx.userId}". Ignoring payload.`);
+    return null;
+  }
+  if (device.type !== ctx.deviceType) {
+    console.warn(
+      `[Telemetry] Device "${ctx.deviceId}" type mismatch. Expected ${device.type}, got ${ctx.deviceType}.`,
+    );
+    return null;
+  }
+  return device;
+}
+
+export async function handleDroneTelemetry(
+  ctx: TelemetryContext,
+  data: Record<string, unknown>,
+): Promise<void> {
+  const startedAt = Date.now();
+  const device = await validateRegisteredDevice(ctx);
+  if (!device) {
+    await saveProcessingLog({
+      ctx,
+      payload: data,
+      startedAt,
+      status: 'rejected',
+      validationMessage: 'Device not found or type mismatch.',
+    });
+    return;
+  }
+
+  const { userId, deviceId } = ctx;
   const parcelId = String(data.parcelId ?? '');
   const flightId = String(data.flightId ?? '');
   const status = String(data.status ?? '');
@@ -26,6 +103,20 @@ export async function handleDroneTelemetry(data: Record<string, unknown>): Promi
   }
 
   if (flightId && userId && status === 'completed') {
+    const flight = await getFlight(userId, flightId);
+    if (!flight || flight.parcelId !== parcelId) {
+      const validationMessage = `Flight "${flightId}" is not valid for user "${userId}" and parcel "${parcelId}".`;
+      console.warn(`[Telemetry] ${validationMessage}`);
+      await saveProcessingLog({
+        ctx,
+        payload: data,
+        startedAt,
+        status: 'rejected',
+        validationMessage,
+      });
+      return;
+    }
+
     await updateFlight(userId, flightId, {
       status: 'completed',
       completedAt: new Date().toISOString(),
@@ -34,58 +125,105 @@ export async function handleDroneTelemetry(data: Record<string, unknown>): Promi
 
     const parcel = await getParcel(userId, parcelId);
     if (parcel && ndvi > 0) {
-      await runAnalysisPipeline(userId, parcel, ndvi, data);
+      await runAnalysisPipeline(ctx, parcel, ndvi, data, startedAt);
+      return;
     }
   }
 
   if (userId) {
     await upsertDevice(userId, {
-      deviceId: String(data.droneId ?? 'drone_001'),
+      ...device,
+      deviceId,
       userId,
       type: 'drone',
-      name: 'Field Drone',
       status: status === 'idle' ? 'online' : 'online',
       batteryLevel: Number(data.batteryLevel ?? 100),
       lastSeenAt: new Date().toISOString(),
     });
   }
+
+  await saveProcessingLog({
+    ctx,
+    payload: data,
+    startedAt,
+    status: 'processed',
+    actions: ['device:updateStatus'],
+  });
 }
 
-export async function handleSensorTelemetry(data: Record<string, unknown>): Promise<void> {
-  const userId = String(data.userId ?? '');
-  const sensorId = String(data.sensorId ?? 'sensor_001');
+export async function handleSensorTelemetry(
+  ctx: TelemetryContext,
+  data: Record<string, unknown>,
+): Promise<void> {
+  const startedAt = Date.now();
+  const device = await validateRegisteredDevice(ctx);
+  if (!device) {
+    await saveProcessingLog({
+      ctx,
+      payload: data,
+      startedAt,
+      status: 'rejected',
+      validationMessage: 'Device not found or type mismatch.',
+    });
+    return;
+  }
+
+  const { userId, deviceId } = ctx;
   const batteryLevel = Number(data.batteryLevel ?? 100);
 
   if (!userId) return;
 
   const status = batteryLevel < 20 ? 'lowBattery' : 'online';
   await upsertDevice(userId, {
-    deviceId: sensorId,
+    ...device,
+    deviceId,
     userId,
     type: 'sensor',
-    name: `Sensor ${sensorId}`,
     status,
     batteryLevel,
     lastSeenAt: new Date().toISOString(),
   });
 
   if (batteryLevel < 20) {
-    await sendNotification(userId, 'deviceLowBattery', { deviceId: sensorId, batteryLevel });
+    await sendNotification(userId, 'deviceLowBattery', { deviceId, batteryLevel });
   }
+
+  await saveProcessingLog({
+    ctx,
+    payload: data,
+    startedAt,
+    status: 'processed',
+    actions: batteryLevel < 20 ? ['device:updateStatus', 'notify:deviceLowBattery'] : ['device:updateStatus'],
+  });
 }
 
-export async function handleNestTelemetry(data: Record<string, unknown>): Promise<void> {
-  const userId = String(data.userId ?? '');
-  const nestId = String(data.nestId ?? 'nest_001');
+export async function handleNestTelemetry(
+  ctx: TelemetryContext,
+  data: Record<string, unknown>,
+): Promise<void> {
+  const startedAt = Date.now();
+  const device = await validateRegisteredDevice(ctx);
+  if (!device) {
+    await saveProcessingLog({
+      ctx,
+      payload: data,
+      startedAt,
+      status: 'rejected',
+      validationMessage: 'Device not found or type mismatch.',
+    });
+    return;
+  }
+
+  const { userId, deviceId } = ctx;
   const supplyLevel = Number(data.supplyLevel ?? 100);
 
   if (!userId) return;
 
   await upsertDevice(userId, {
-    deviceId: nestId,
+    ...device,
+    deviceId,
     userId,
     type: 'nest',
-    name: 'Drone Nest',
     status: 'online',
     batteryLevel: Number(data.batteryLevel ?? 100),
     lastSeenAt: new Date().toISOString(),
@@ -94,13 +232,22 @@ export async function handleNestTelemetry(data: Record<string, unknown>): Promis
   if (supplyLevel < 15) {
     await sendNotification(userId, 'supplyLow', { parcelId: String(data.parcelId ?? '') });
   }
+
+  await saveProcessingLog({
+    ctx,
+    payload: data,
+    startedAt,
+    status: 'processed',
+    actions: supplyLevel < 15 ? ['device:updateStatus', 'notify:supplyLow'] : ['device:updateStatus'],
+  });
 }
 
 async function runAnalysisPipeline(
-  userId: string,
+  ctx: TelemetryContext,
   parcel: Awaited<ReturnType<typeof getParcel>> & object,
   ndvi: number,
   telemetry: Record<string, unknown>,
+  startedAt: number,
 ): Promise<void> {
   const request: AiAnalysisRequest = {
     parcelId: parcel.parcelId,
@@ -114,68 +261,55 @@ async function runAnalysisPipeline(
     soilMoisture: parcel.soilMoisture ?? Number(telemetry.soilMoisture ?? 0),
     cropType: parcel.cropType,
     timestamp: new Date().toISOString(),
+    imageUrl: typeof telemetry.imageUrl === 'string' ? telemetry.imageUrl : undefined,
+    imageBase64: typeof telemetry.imageBase64 === 'string' ? telemetry.imageBase64 : undefined,
+    coordinates: Array.isArray(telemetry.coordinates) ? telemetry.coordinates as AiAnalysisRequest['coordinates'] : parcel.coordinates,
   };
 
+  let analysis: AiAnalysisResponse;
   try {
-    const analysis = await requestAiAnalysis(request);
-    await applyDecisionEngine({
-      userId,
+    analysis = await requestAiAnalysis(request);
+  } catch (error) {
+    console.error('[Telemetry] AI analysis failed:', error);
+    await saveProcessingLog({
+      ctx,
+      payload: telemetry,
+      startedAt,
+      status: 'failed',
+      aiRequest: request,
+      validationMessage: error instanceof Error ? error.message : 'AI analysis failed',
+      actions: ['flight:completed', 'notify:flightCompleted', 'ai:failed'],
+    });
+    return;
+  }
+
+  try {
+    const actions = await applyDecisionEngine({
+      userId: ctx.userId,
       parcelId: parcel.parcelId,
       zoneId: parcel.zoneId,
       analysis,
     });
+    await saveProcessingLog({
+      ctx,
+      payload: telemetry,
+      startedAt,
+      status: 'processed',
+      aiRequest: request,
+      aiResponse: analysis,
+      actions: ['flight:completed', 'notify:flightCompleted', 'ai:analyze', ...actions],
+    });
   } catch (error) {
-    console.error('[Telemetry] AI analysis failed:', error);
+    console.error('[Telemetry] Decision pipeline failed:', error);
+    await saveProcessingLog({
+      ctx,
+      payload: telemetry,
+      startedAt,
+      status: 'failed',
+      aiRequest: request,
+      aiResponse: analysis,
+      validationMessage: error instanceof Error ? error.message : 'Decision pipeline failed',
+      actions: ['flight:completed', 'notify:flightCompleted', 'ai:analyze', 'decision:failed'],
+    });
   }
-}
-
-export async function seedDemoData(userId: string): Promise<void> {
-  const now = new Date().toISOString();
-  await upsertParcel(userId, {
-    parcelId: 'parcel_001',
-    userId,
-    cropType: '',
-    name: 'North Field',
-    ndvi: 0.72,
-    healthStatus: 'green',
-    zoneId: 'zone_a',
-    soilNutrients: { nitrogen: 45, phosphorus: 30, potassium: 55 },
-    soilMoisture: 42,
-    coordinates: [
-      { lat: 19.4326, lng: -99.1332 },
-      { lat: 19.4336, lng: -99.1322 },
-      { lat: 19.4316, lng: -99.1312 },
-    ],
-    createdAt: now,
-  });
-
-  await upsertDevice(userId, {
-    deviceId: 'drone_001',
-    userId,
-    type: 'drone',
-    name: 'Field Drone',
-    status: 'online',
-    batteryLevel: 87,
-    lastSeenAt: now,
-  });
-
-  await upsertDevice(userId, {
-    deviceId: 'sensor_zone_a',
-    userId,
-    type: 'sensor',
-    name: 'Sensor Zone A',
-    status: 'online',
-    batteryLevel: 65,
-    lastSeenAt: now,
-  });
-
-  await upsertDevice(userId, {
-    deviceId: 'nest_001',
-    userId,
-    type: 'nest',
-    name: 'Drone Nest',
-    status: 'online',
-    batteryLevel: 100,
-    lastSeenAt: now,
-  });
 }

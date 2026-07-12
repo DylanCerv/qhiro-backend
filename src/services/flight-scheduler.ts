@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import {
   createFlight,
   getAllEnabledSchedules,
+  getDevices,
   upsertSchedule,
 } from './firebase.js';
 import { sendDroneCommand } from './mqtt.js';
@@ -36,6 +37,14 @@ async function processDueFlights(): Promise<void> {
 
     const flightId = randomUUID();
     const startedAt = now.toISOString();
+    const drone = (await getDevices(schedule.userId)).find(
+      (device) => device.type === 'drone' && device.status !== 'offline',
+    );
+
+    if (!drone) {
+      console.warn(`[Scheduler] No available drone for user ${schedule.userId}. Skipping schedule ${schedule.scheduleId}`);
+      continue;
+    }
 
     await createFlight(schedule.userId, {
       flightId,
@@ -52,6 +61,7 @@ async function processDueFlights(): Promise<void> {
       action: 'startFlight',
       flightId,
       userId: schedule.userId,
+      deviceId: drone.deviceId,
       parcelId: schedule.parcelId,
       scheduleType: schedule.scheduleType ?? 'routine',
       timestamp: startedAt,

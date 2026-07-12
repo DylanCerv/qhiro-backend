@@ -15,8 +15,17 @@ export const env = {
     process.env.FIREBASE_DATABASE_URL ||
     (projectId ? `https://${projectId}-default-rtdb.firebaseio.com` : ''),
   firebaseServiceAccountPath: process.env.FIREBASE_SERVICE_ACCOUNT_PATH ?? '',
+  firebaseStorageBucket:
+    process.env.FIREBASE_STORAGE_BUCKET ||
+    (projectId ? `${projectId}.firebasestorage.app` : ''),
   firebaseWebApiKey: process.env.FIREBASE_WEB_API_KEY ?? '',
+  firebaseAdminEmail: process.env.FIREBASE_ADMIN_EMAIL ?? '',
+  firebaseAdminPassword: process.env.FIREBASE_ADMIN_PASSWORD ?? '',
+  firebaseAdminDisplayName: process.env.FIREBASE_ADMIN_DISPLAY_NAME ?? 'Qhiro Symbiotic Admin',
   mqttBrokerUrl: process.env.MQTT_BROKER_URL ?? 'mqtt://localhost:1883',
+  mqttUsername: process.env.MQTT_USERNAME ?? '',
+  mqttPassword: process.env.MQTT_PASSWORD ?? '',
+  mqttClientId: process.env.MQTT_CLIENT_ID ?? '',
   aiBackendUrl: process.env.AI_BACKEND_URL ?? 'http://localhost:8000',
 };
 

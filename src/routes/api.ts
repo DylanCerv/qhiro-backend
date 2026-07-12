@@ -2,20 +2,25 @@ import { Hono } from 'hono';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { authMiddleware } from '../middleware/auth.js';
+import { CROP_TYPES } from '../services/crops.js';
 import { isFirebaseAuthConfigured } from '../services/firebase-auth.js';
 import {
   admin,
   deleteSchedule,
+  getActionExecutionLogs,
   getAlerts,
+  getDevice,
   getDevices,
   getFlights,
   getParcels,
   getReportPdfBuffer,
   getReports,
   getSchedules,
+  getTelemetryProcessingLogs,
   upsertDevice,
   upsertSchedule,
 } from '../services/firebase.js';
+import { publishTelemetry } from '../services/mqtt.js';
 import type { Device, ScheduleType } from '../types/index.js';
 
 const scheduleSchema = z.object({
@@ -30,6 +35,12 @@ const scheduleSchema = z.object({
 const deviceSchema = z.object({
   name: z.string().min(2),
   type: z.enum(['drone', 'sensor', 'nest']),
+});
+
+const telemetryPayloadSchema = z.object({
+  deviceId: z.string().min(1),
+  deviceType: z.enum(['drone', 'sensor', 'nest']),
+  payload: z.record(z.unknown()),
 });
 
 export const apiRoutes = new Hono();
@@ -47,12 +58,26 @@ apiRoutes.get('/health', (c) =>
   }),
 );
 
+apiRoutes.get('/crops', (c) => c.json({ crops: CROP_TYPES }));
+
 apiRoutes.use('/*', authMiddleware);
 
 apiRoutes.get('/alerts', async (c) => {
   const user = c.get('user');
   const alerts = await getAlerts(user.uid);
   return c.json({ alerts });
+});
+
+apiRoutes.get('/telemetry-logs', async (c) => {
+  const user = c.get('user');
+  const logs = await getTelemetryProcessingLogs(user.uid);
+  return c.json({ logs });
+});
+
+apiRoutes.get('/action-logs', async (c) => {
+  const user = c.get('user');
+  const logs = await getActionExecutionLogs(user.uid);
+  return c.json({ logs });
 });
 
 apiRoutes.get('/schedules', async (c) => {
@@ -134,6 +159,55 @@ apiRoutes.post('/devices', async (c) => {
 
   await upsertDevice(user.uid, device);
   return c.json({ device }, 201);
+});
+
+apiRoutes.put('/devices/:deviceId', async (c) => {
+  const user = c.get('user');
+  const deviceId = c.req.param('deviceId');
+  const body = await c.req.json();
+  const parsed = deviceSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ error: 'Invalid device payload', details: parsed.error.flatten() }, 400);
+  }
+
+  const existing = await getDevice(user.uid, deviceId);
+  if (!existing) {
+    return c.json({ error: 'Device not found' }, 404);
+  }
+
+  const device: Device = {
+    ...existing,
+    name: parsed.data.name,
+    type: parsed.data.type,
+    lastSeenAt: new Date().toISOString(),
+  };
+
+  await upsertDevice(user.uid, device);
+  return c.json({ device });
+});
+
+apiRoutes.post('/simulator/telemetry', async (c) => {
+  const user = c.get('user');
+  const body = await c.req.json();
+  const parsed = telemetryPayloadSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ error: 'Invalid telemetry payload', details: parsed.error.flatten() }, 400);
+  }
+
+  const { deviceId, deviceType, payload } = parsed.data;
+  const device = await getDevice(user.uid, deviceId);
+  if (!device) {
+    return c.json({ error: 'Device not found for current user' }, 404);
+  }
+  if (device.type !== deviceType) {
+    return c.json({ error: `Device type mismatch. Registered as ${device.type}.` }, 400);
+  }
+
+  publishTelemetry(user.uid, deviceId, deviceType, payload);
+  return c.json({
+    published: true,
+    topic: `qhiro/users/${user.uid}/devices/${deviceId}/${deviceType}/telemetry`,
+  });
 });
 
 apiRoutes.get('/reports', async (c) => {

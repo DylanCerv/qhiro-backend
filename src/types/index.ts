@@ -16,6 +16,16 @@ export interface SoilNutrients {
   potassium: number;
 }
 
+export interface GeoPoint {
+  lat: number;
+  lng: number;
+}
+
+export interface CropTypeOption {
+  value: string;
+  label: string;
+}
+
 export interface AiAnalysisRequest {
   parcelId: string;
   zoneId: string;
@@ -24,6 +34,9 @@ export interface AiAnalysisRequest {
   soilMoisture: number;
   cropType?: string;
   timestamp: string;
+  imageUrl?: string;
+  imageBase64?: string;
+  coordinates?: GeoPoint[];
 }
 
 export interface AiAnalysisResponse {
@@ -32,6 +45,7 @@ export interface AiAnalysisResponse {
   recommendedNpkFormula: SoilNutrients;
   recommendedAction: RecommendedAction;
   explanation: string;
+  affectedCoordinates?: GeoPoint[] | null;
 }
 
 export interface Parcel {
@@ -42,7 +56,7 @@ export interface Parcel {
   ndvi: number;
   healthStatus: 'green' | 'yellow' | 'red';
   zoneId: string;
-  coordinates?: { lat: number; lng: number }[];
+  coordinates?: GeoPoint[];
   soilNutrients?: SoilNutrients;
   soilMoisture?: number;
   createdAt: string;
@@ -105,14 +119,46 @@ export interface Report {
   createdAt: string;
 }
 
+export type TelemetryProcessingStatus = 'processed' | 'rejected' | 'failed';
+
+export interface TelemetryProcessingLog {
+  logId: string;
+  userId: string;
+  deviceId: string;
+  deviceType: Device['type'];
+  parcelId?: string;
+  flightId?: string;
+  status: TelemetryProcessingStatus;
+  validationMessage?: string;
+  payload: Record<string, unknown>;
+  aiRequest?: AiAnalysisRequest;
+  aiResponse?: AiAnalysisResponse;
+  actions: string[];
+  durationMs: number;
+  createdAt: string;
+}
+
+export type ActionExecutionStatus = 'pending' | 'completed' | 'failed';
+
+export interface ActionExecutionLog {
+  actionId: string;
+  userId: string;
+  deviceId: string;
+  parcelId: string;
+  zoneId: string;
+  action: 'inject' | 'rescan' | 'command';
+  status: ActionExecutionStatus;
+  commandPayload: Record<string, unknown>;
+  ackPayload?: Record<string, unknown>;
+  error?: string;
+  startedAt: string;
+  completedAt?: string;
+  durationMs?: number;
+}
+
 export type UserRole = 'admin' | 'client';
 
 export type AccountStatus = 'active' | 'suspended' | 'disabled';
-
-export interface GeoPoint {
-  lat: number;
-  lng: number;
-}
 
 export interface UserProfile {
   userId: string;
@@ -122,6 +168,7 @@ export interface UserProfile {
   accountStatus: AccountStatus;
   country: string;
   location: GeoPoint;
+  fcmToken?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -134,4 +181,5 @@ export interface AuthenticatedUser {
   displayName?: string;
   country?: string;
   location?: GeoPoint;
+  fcmToken?: string;
 }

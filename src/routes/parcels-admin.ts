@@ -6,12 +6,18 @@ import { authMiddleware } from '../middleware/auth.js';
 import {
   admin,
   deleteParcel,
+  createFlight,
+  getActionExecutionLogs,
   getAllClients,
+  getDevice,
+  getDevices,
   getParcels,
+  getTelemetryProcessingLogs,
   getUserProfile,
   updateClientAccountStatus,
   upsertParcel,
 } from '../services/firebase.js';
+import { getMqttStatus, publishMqttDiagnostic, publishTelemetry } from '../services/mqtt.js';
 import type { AccountStatus, Parcel } from '../types/index.js';
 
 const parcelSchema = z.object({
@@ -33,6 +39,23 @@ const parcelSchema = z.object({
 
 const accountStatusSchema = z.object({
   accountStatus: z.enum(['active', 'suspended', 'disabled']),
+});
+
+const mqttDiagnosticSchema = z.object({
+  message: z.string().min(1).max(500).default('Qhiro MQTT diagnostic ping'),
+});
+
+const adminTelemetrySchema = z.object({
+  userId: z.string().min(1),
+  deviceId: z.string().min(1),
+  deviceType: z.enum(['drone', 'sensor', 'nest']),
+  payload: z.record(z.unknown()),
+});
+
+const testFlightSchema = z.object({
+  userId: z.string().min(1),
+  parcelId: z.string().min(1),
+  deviceId: z.string().min(1),
 });
 
 export const parcelRoutes = new Hono();
@@ -149,4 +172,188 @@ adminRoutes.patch('/clients/:userId/account-status', async (c) => {
   }
 
   return c.json({ client: updated });
+});
+
+adminRoutes.get('/clients/:userId/devices', async (c) => {
+  const userId = c.req.param('userId');
+  const profile = await getUserProfile(userId);
+  if (!profile || profile.role !== 'client') {
+    return c.json({ error: 'Client not found' }, 404);
+  }
+
+  const devices = await getDevices(userId);
+  return c.json({ client: profile, devices });
+});
+
+adminRoutes.get('/clients/:userId/parcels', async (c) => {
+  const userId = c.req.param('userId');
+  const profile = await getUserProfile(userId);
+  if (!profile || profile.role !== 'client') {
+    return c.json({ error: 'Client not found' }, 404);
+  }
+
+  const parcels = await getParcels(userId);
+  return c.json({ client: profile, parcels });
+});
+
+adminRoutes.get('/clients/:userId/telemetry-logs', async (c) => {
+  const userId = c.req.param('userId');
+  const profile = await getUserProfile(userId);
+  if (!profile || profile.role !== 'client') {
+    return c.json({ error: 'Client not found' }, 404);
+  }
+
+  const logs = await getTelemetryProcessingLogs(userId);
+  return c.json({ client: profile, logs });
+});
+
+adminRoutes.get('/clients/:userId/action-logs', async (c) => {
+  const userId = c.req.param('userId');
+  const profile = await getUserProfile(userId);
+  if (!profile || profile.role !== 'client') {
+    return c.json({ error: 'Client not found' }, 404);
+  }
+
+  const logs = await getActionExecutionLogs(userId);
+  return c.json({ client: profile, logs });
+});
+
+adminRoutes.get('/mqtt/status', (c) => c.json({ mqtt: getMqttStatus() }));
+
+adminRoutes.post('/mqtt/diagnostic', async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = mqttDiagnosticSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ error: 'Invalid MQTT diagnostic payload', details: parsed.error.flatten() }, 400);
+  }
+
+  publishMqttDiagnostic({
+    message: parsed.data.message,
+    adminUserId: c.get('user').uid,
+  });
+
+  return c.json({
+    published: true,
+    topic: 'qhiro/admin/diagnostics',
+    mqtt: getMqttStatus(),
+  });
+});
+
+adminRoutes.post('/mqtt/telemetry', async (c) => {
+  const body = await c.req.json();
+  const parsed = adminTelemetrySchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ error: 'Invalid admin telemetry payload', details: parsed.error.flatten() }, 400);
+  }
+
+  const { userId, deviceId, deviceType, payload } = parsed.data;
+  const device = await getDevice(userId, deviceId);
+  if (!device) {
+    return c.json({ error: 'Device not found for the provided userId' }, 404);
+  }
+  if (device.type !== deviceType) {
+    return c.json({ error: `Device type mismatch. Registered as ${device.type}.` }, 400);
+  }
+
+  publishTelemetry(userId, deviceId, deviceType, payload);
+  return c.json({
+    published: true,
+    topic: `qhiro/users/${userId}/devices/${deviceId}/${deviceType}/telemetry`,
+    mqtt: getMqttStatus(),
+  });
+});
+
+adminRoutes.post('/mqtt/test-flight', async (c) => {
+  const body = await c.req.json();
+  const parsed = testFlightSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ error: 'Invalid test flight payload', details: parsed.error.flatten() }, 400);
+  }
+
+  const { userId, parcelId, deviceId } = parsed.data;
+  const device = await getDevice(userId, deviceId);
+  if (!device) {
+    return c.json({ error: 'Device not found for the provided userId' }, 404);
+  }
+  if (device.type !== 'drone') {
+    return c.json({ error: `Test flight requires a drone. Registered as ${device.type}.` }, 400);
+  }
+
+  const parcel = (await getParcels(userId)).find((item) => item.parcelId === parcelId);
+  if (!parcel) {
+    return c.json({ error: 'Parcel not found for the provided userId' }, 404);
+  }
+
+  const now = new Date().toISOString();
+  const flight = {
+    flightId: randomUUID(),
+    userId,
+    parcelId,
+    status: 'started' as const,
+    scheduledAt: now,
+    startedAt: now,
+    completedAt: null,
+    reportId: null,
+  };
+
+  await createFlight(userId, flight);
+  return c.json({ flight });
+});
+
+adminRoutes.post('/mqtt/test-drone-flow', async (c) => {
+  const body = await c.req.json();
+  const parsed = z.object({
+    userId: z.string().min(1),
+    parcelId: z.string().min(1),
+    deviceId: z.string().min(1),
+    payload: z.record(z.unknown()),
+  }).safeParse(body);
+
+  if (!parsed.success) {
+    return c.json({ error: 'Invalid test drone flow payload', details: parsed.error.flatten() }, 400);
+  }
+
+  const { userId, parcelId, deviceId } = parsed.data;
+  const device = await getDevice(userId, deviceId);
+  if (!device) {
+    return c.json({ error: 'Device not found for the provided userId' }, 404);
+  }
+  if (device.type !== 'drone') {
+    return c.json({ error: `Full drone flow requires a drone. Registered as ${device.type}.` }, 400);
+  }
+
+  const parcel = (await getParcels(userId)).find((item) => item.parcelId === parcelId);
+  if (!parcel) {
+    return c.json({ error: 'Parcel not found for the provided userId' }, 404);
+  }
+
+  const now = new Date().toISOString();
+  const flight = {
+    flightId: randomUUID(),
+    userId,
+    parcelId,
+    status: 'started' as const,
+    scheduledAt: now,
+    startedAt: now,
+    completedAt: null,
+    reportId: null,
+  };
+  const payload = {
+    ...parsed.data.payload,
+    parcelId,
+    flightId: flight.flightId,
+    status: 'completed',
+    timestamp: now,
+  };
+
+  await createFlight(userId, flight);
+  publishTelemetry(userId, deviceId, 'drone', payload);
+
+  return c.json({
+    published: true,
+    flight,
+    payload,
+    topic: `qhiro/users/${userId}/devices/${deviceId}/drone/telemetry`,
+    mqtt: getMqttStatus(),
+  });
 });

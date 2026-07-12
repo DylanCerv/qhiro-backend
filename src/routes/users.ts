@@ -8,9 +8,7 @@ import {
 } from '../services/firebase-auth.js';
 import {
   admin,
-  createFirebaseAuthUser,
   getUserProfile,
-  loginDemoUser,
   upsertUserProfile,
 } from '../services/firebase.js';
 import type { UserProfile } from '../types/index.js';
@@ -24,6 +22,7 @@ const registerSchema = z.object({
     lat: z.number(),
     lng: z.number(),
   }),
+  fcmToken: z.string().min(10).optional(),
 });
 
 const profileUpdateSchema = z.object({
@@ -35,6 +34,7 @@ const profileUpdateSchema = z.object({
       lng: z.number(),
     })
     .optional(),
+  fcmToken: z.string().min(10).nullable().optional(),
 });
 
 const loginSchema = z.object({
@@ -52,20 +52,22 @@ userRoutes.post('/login', async (c) => {
   }
 
   try {
-    if (isFirebaseAuthConfigured() && admin.apps.length) {
-      const session = await signInWithPassword(parsed.data.email, parsed.data.password);
-      return c.json({
-        uid: session.uid,
-        email: session.email,
-        token: session.idToken,
-      });
+    if (!isFirebaseAuthConfigured() || !admin.apps.length) {
+      return c.json(
+        {
+          error:
+            'Firebase Authentication is not configured. Set FIREBASE_WEB_API_KEY and load the admin service account.',
+        },
+        500,
+      );
     }
 
-    const session = await loginDemoUser(parsed.data.email, parsed.data.password);
-    if (!session) {
-      return c.json({ error: 'Invalid email or password' }, 401);
-    }
-    return c.json(session);
+    const session = await signInWithPassword(parsed.data.email, parsed.data.password);
+    return c.json({
+      uid: session.uid,
+      email: session.email,
+      token: session.idToken,
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Login failed';
     return c.json({ error: message }, 401);
@@ -92,26 +94,22 @@ userRoutes.post('/register', async (c) => {
       );
     }
 
-    let userId: string;
-    let userEmail: string;
-    let token: string;
-
-    if (isFirebaseAuthConfigured() && admin.apps.length) {
-      const session = await signUpWithPassword(email, password);
-      userId = session.uid;
-      userEmail = session.email;
-      token = session.idToken;
-    } else {
-      const authUser = await createFirebaseAuthUser(email, password, displayName);
-      userId = authUser.uid;
-      userEmail = authUser.email;
-      token = `demo-user:${authUser.uid}`;
+    if (!isFirebaseAuthConfigured() || !admin.apps.length) {
+      return c.json(
+        {
+          error:
+            'Firebase Authentication is not configured. Set FIREBASE_WEB_API_KEY and load the admin service account.',
+        },
+        500,
+      );
     }
+
+    const session = await signUpWithPassword(email, password);
 
     const now = new Date().toISOString();
     const profile: UserProfile = {
-      userId,
-      email: userEmail,
+      userId: session.uid,
+      email: session.email,
       displayName,
       role: 'client',
       accountStatus: 'active',
@@ -122,7 +120,7 @@ userRoutes.post('/register', async (c) => {
     };
     await upsertUserProfile(profile);
 
-    return c.json({ userId, email: userEmail, token }, 201);
+    return c.json({ userId: session.uid, email: session.email, token: session.idToken }, 201);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Registration failed';
     return c.json({ error: message }, 400);
@@ -153,6 +151,7 @@ userRoutes.post('/profile', tokenMiddleware, async (c) => {
     accountStatus: 'active',
     country: parsed.data.country,
     location: parsed.data.location,
+    fcmToken: parsed.data.fcmToken,
     createdAt: now,
     updatedAt: now,
   };
@@ -184,6 +183,7 @@ userRoutes.put('/me', async (c) => {
   const updated: UserProfile = {
     ...existing,
     ...parsed.data,
+    fcmToken: parsed.data.fcmToken ?? undefined,
     updatedAt: new Date().toISOString(),
   };
   await upsertUserProfile(updated);

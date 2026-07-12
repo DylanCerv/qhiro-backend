@@ -3,11 +3,13 @@ import { env, loadServiceAccount } from '../config/env.js';
 import type {
   Alert,
   AccountStatus,
+  ActionExecutionLog,
   Device,
   Flight,
   FlightSchedule,
   Parcel,
   Report,
+  TelemetryProcessingLog,
   UserProfile,
 } from '../types/index.js';
 
@@ -21,8 +23,9 @@ export function initFirebase(): void {
     admin.initializeApp({
       credential: admin.credential.cert(serviceAccount as admin.ServiceAccount),
       projectId: env.firebaseProjectId,
-      storageBucket: `${env.firebaseProjectId}.appspot.com`,
+      storageBucket: env.firebaseStorageBucket || undefined,
     });
+    admin.firestore().settings({ ignoreUndefinedProperties: true });
     console.log(`[Firebase] Connected to project "${env.firebaseProjectId}"`);
     console.log('[Firebase] Using Cloud Firestore for application data.');
   } else {
@@ -53,45 +56,17 @@ function memSet(path: string, value: unknown): void {
 }
 
 export const ADMIN_SEED = {
-  email: 'qhiro-symbiotic@qhiro-symbiotic.com',
-  password: '123456789',
-  displayName: 'Qhiro Symbiotic Admin',
-  demoUserId: 'admin_demo',
+  email: env.firebaseAdminEmail,
+  password: env.firebaseAdminPassword,
+  displayName: env.firebaseAdminDisplayName,
 } as const;
 
-const DEMO_USERS: Record<string, UserProfile> = {
-  [ADMIN_SEED.demoUserId]: {
-    userId: ADMIN_SEED.demoUserId,
-    email: ADMIN_SEED.email,
-    displayName: ADMIN_SEED.displayName,
-    role: 'admin',
-    accountStatus: 'active',
-    country: 'EC',
-    location: { lat: -0.1807, lng: -78.4678 },
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  },
-};
-
-const demoCredentials: Record<string, { userId: string; password: string }> = {
-  [ADMIN_SEED.email.toLowerCase()]: {
-    userId: ADMIN_SEED.demoUserId,
-    password: ADMIN_SEED.password,
-  },
-};
-
-function resolveDemoToken(token: string): { uid: string; email?: string } | null {
-  if (token === 'demo-admin') {
-    return { uid: ADMIN_SEED.demoUserId, email: ADMIN_SEED.email };
-  }
-  if (token.startsWith('demo-user:')) {
-    const uid = token.slice('demo-user:'.length);
-    return { uid };
-  }
-  return null;
-}
-
 export async function seedAdminUser(): Promise<void> {
+  if (!ADMIN_SEED.email || !ADMIN_SEED.password) {
+    console.warn('[Seed] Admin credentials not configured. Skipping admin bootstrap.');
+    return;
+  }
+
   const now = new Date().toISOString();
   const profileBase = {
     email: ADMIN_SEED.email,
@@ -134,32 +109,11 @@ export async function seedAdminUser(): Promise<void> {
     console.log(`[Seed] Admin user ready: ${ADMIN_SEED.email}`);
     return;
   }
-
-  await upsertUserProfile({ ...profileBase, userId: ADMIN_SEED.demoUserId });
-  console.log(`[Seed] Demo admin ready: ${ADMIN_SEED.email}`);
-}
-
-export async function loginDemoUser(
-  email: string,
-  password: string,
-): Promise<{ uid: string; email: string; token: string } | null> {
-  if (admin.apps.length) return null;
-  const cred = demoCredentials[email.toLowerCase()];
-  if (cred && cred.password === password) {
-    return { uid: cred.userId, email, token: `demo-user:${cred.userId}` };
-  }
-  const stored = memGet<{ userId: string; password: string }>(`auth/${email.toLowerCase()}`);
-  if (stored && stored.password === password) {
-    return { uid: stored.userId, email, token: `demo-user:${stored.userId}` };
-  }
-  return null;
 }
 
 export async function verifyIdToken(token: string): Promise<{ uid: string; email?: string }> {
   if (!admin.apps.length) {
-    const demo = resolveDemoToken(token);
-    if (demo) return demo;
-    throw new Error('Invalid demo token');
+    throw new Error('Firebase Admin is not configured.');
   }
   const decoded = await admin.auth().verifyIdToken(token);
   return { uid: decoded.uid, email: decoded.email };
@@ -168,8 +122,7 @@ export async function verifyIdToken(token: string): Promise<{ uid: string; email
 export async function getUserProfile(userId: string): Promise<UserProfile | null> {
   const fs = firestore();
   if (!fs) {
-    const profile = DEMO_USERS[userId] ?? memGet<UserProfile>(`users/${userId}`);
-    return profile ?? null;
+    return memGet<UserProfile>(`users/${userId}`);
   }
   const snap = await fs.collection('users').doc(userId).get();
   return snap.exists ? (snap.data() as UserProfile) : null;
@@ -179,9 +132,6 @@ export async function upsertUserProfile(profile: UserProfile): Promise<void> {
   const fs = firestore();
   if (!fs) {
     memSet(`users/${profile.userId}`, profile);
-    if (DEMO_USERS[profile.userId]) {
-      DEMO_USERS[profile.userId] = profile;
-    }
     return;
   }
   await fs.collection('users').doc(profile.userId).set(profile);
@@ -190,12 +140,9 @@ export async function upsertUserProfile(profile: UserProfile): Promise<void> {
 export async function getAllClients(): Promise<UserProfile[]> {
   const fs = firestore();
   if (!fs) {
-    return Object.values(DEMO_USERS)
-      .concat(
-        Object.entries(memoryStore)
-          .filter(([key]) => key.startsWith('users/'))
-          .map(([, val]) => val as UserProfile),
-      )
+    return Object.entries(memoryStore)
+      .filter(([key]) => key.startsWith('users/'))
+      .map(([, val]) => val as UserProfile)
       .filter((user, index, arr) => arr.findIndex((u) => u.userId === user.userId) === index)
       .filter((user) => user.role === 'client');
   }
@@ -225,28 +172,10 @@ export async function createFirebaseAuthUser(
   displayName: string,
 ): Promise<{ uid: string; email: string }> {
   if (!admin.apps.length) {
-    const uid = `client_${randomId()}`;
-    const profile: UserProfile = {
-      userId: uid,
-      email,
-      displayName,
-      role: 'client',
-      accountStatus: 'active',
-      country: 'EC',
-      location: { lat: -0.1807, lng: -78.4678 },
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-    await upsertUserProfile(profile);
-    memSet(`auth/${email.toLowerCase()}`, { userId: uid, password });
-    return { uid, email };
+    throw new Error('Firebase Admin is not configured.');
   }
   const user = await admin.auth().createUser({ email, password, displayName });
   return { uid: user.uid, email: user.email ?? email };
-}
-
-function randomId(): string {
-  return Math.random().toString(36).slice(2, 10);
 }
 
 export async function getParcels(userId: string): Promise<Parcel[]> {
@@ -379,17 +308,33 @@ export async function createFlight(userId: string, flight: Flight): Promise<void
   await fs.collection('flights').doc(flight.flightId).set({ ...flight, userId });
 }
 
-export async function updateFlight(userId: string, flightId: string, patch: Partial<Flight>): Promise<void> {
+export async function getFlight(userId: string, flightId: string): Promise<Flight | null> {
+  const fs = firestore();
+  if (!fs) {
+    const data = memGet<Record<string, Flight>>(`flights/${userId}`);
+    return data?.[flightId] ?? null;
+  }
+  const snap = await fs.collection('flights').doc(flightId).get();
+  if (!snap.exists || snap.data()?.userId !== userId) return null;
+  return snap.data() as Flight;
+}
+
+export async function updateFlight(userId: string, flightId: string, patch: Partial<Flight>): Promise<boolean> {
   const fs = firestore();
   if (!fs) {
     const existing = memGet<Record<string, Flight>>(`flights/${userId}`) ?? {};
     if (existing[flightId]) {
       existing[flightId] = { ...existing[flightId], ...patch };
       memSet(`flights/${userId}`, existing);
+      return true;
     }
-    return;
+    return false;
   }
+  const ref = fs.collection('flights').doc(flightId);
+  const snap = await ref.get();
+  if (!snap.exists || snap.data()?.userId !== userId) return false;
   await fs.collection('flights').doc(flightId).set({ ...patch, userId }, { merge: true });
+  return true;
 }
 
 export async function getFlights(userId: string): Promise<Flight[]> {
@@ -437,6 +382,24 @@ export async function getDevices(userId: string): Promise<Device[]> {
   return snap.docs.map((doc) => doc.data() as Device);
 }
 
+export async function getDevice(userId: string, deviceId: string): Promise<Device | null> {
+  const fs = firestore();
+  if (!fs) {
+    const data = memGet<Record<string, Device>>(`devices/${userId}`);
+    return data?.[deviceId] ?? null;
+  }
+  const scopedSnap = await fs.collection('devices').doc(deviceDocId(userId, deviceId)).get();
+  if (scopedSnap.exists && scopedSnap.data()?.userId === userId) {
+    return scopedSnap.data() as Device;
+  }
+
+  const legacySnap = await fs.collection('devices').doc(deviceId).get();
+  if (legacySnap.exists && legacySnap.data()?.userId === userId) {
+    return legacySnap.data() as Device;
+  }
+  return null;
+}
+
 export async function upsertDevice(userId: string, device: Device): Promise<void> {
   const fs = firestore();
   if (!fs) {
@@ -445,7 +408,11 @@ export async function upsertDevice(userId: string, device: Device): Promise<void
     memSet(`devices/${userId}`, existing);
     return;
   }
-  await fs.collection('devices').doc(device.deviceId).set({ ...device, userId });
+  await fs.collection('devices').doc(deviceDocId(userId, device.deviceId)).set({ ...device, userId });
+}
+
+function deviceDocId(userId: string, deviceId: string): string {
+  return `${userId}_${deviceId}`;
 }
 
 export async function saveReport(userId: string, report: Report): Promise<void> {
@@ -479,8 +446,118 @@ export async function uploadReportPdf(userId: string, reportId: string, buffer: 
     return storagePath;
   }
   const file = bucket.file(storagePath);
-  await file.save(buffer, { contentType: 'application/pdf' });
+  await file.save(buffer, {
+    resumable: false,
+    metadata: {
+      contentType: 'application/pdf',
+      contentDisposition: `attachment; filename="qhiro-report-${reportId}.pdf"`,
+      cacheControl: 'private, max-age=0, no-transform',
+    },
+  });
   return storagePath;
+}
+
+export async function saveTelemetryProcessingLog(log: TelemetryProcessingLog): Promise<void> {
+  const fs = firestore();
+  if (!fs) {
+    const existing = memGet<Record<string, TelemetryProcessingLog>>(`telemetryLogs/${log.userId}`) ?? {};
+    existing[log.logId] = log;
+    memSet(`telemetryLogs/${log.userId}`, existing);
+    return;
+  }
+  await fs.collection('telemetryLogs').doc(log.logId).set(log);
+}
+
+export async function getTelemetryProcessingLogs(
+  userId: string,
+  limit = 20,
+): Promise<TelemetryProcessingLog[]> {
+  const fs = firestore();
+  if (!fs) {
+    const data = memGet<Record<string, TelemetryProcessingLog>>(`telemetryLogs/${userId}`);
+    return data
+      ? Object.values(data)
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+        .slice(0, limit)
+      : [];
+  }
+  const snap = await fs.collection('telemetryLogs').where('userId', '==', userId).get();
+  return snap.docs
+    .map((doc) => doc.data() as TelemetryProcessingLog)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    .slice(0, limit);
+}
+
+export async function saveActionExecutionLog(log: ActionExecutionLog): Promise<void> {
+  const fs = firestore();
+  if (!fs) {
+    const existing = memGet<Record<string, ActionExecutionLog>>(`actionLogs/${log.userId}`) ?? {};
+    existing[log.actionId] = log;
+    memSet(`actionLogs/${log.userId}`, existing);
+    return;
+  }
+  await fs.collection('actionLogs').doc(log.actionId).set(log);
+}
+
+export async function completeActionExecutionLog(
+  userId: string,
+  actionId: string,
+  deviceId: string,
+  status: ActionExecutionLog['status'],
+  ackPayload: Record<string, unknown>,
+  error?: string,
+): Promise<ActionExecutionLog | null> {
+  const fs = firestore();
+  const completedAt = new Date().toISOString();
+  if (!fs) {
+    const existing = memGet<Record<string, ActionExecutionLog>>(`actionLogs/${userId}`) ?? {};
+    const log = existing[actionId];
+    if (!log || log.deviceId !== deviceId) return null;
+    const updated: ActionExecutionLog = {
+      ...log,
+      status,
+      ackPayload,
+      error,
+      completedAt,
+      durationMs: new Date(completedAt).getTime() - new Date(log.startedAt).getTime(),
+    };
+    existing[actionId] = updated;
+    memSet(`actionLogs/${userId}`, existing);
+    return updated;
+  }
+
+  const ref = fs.collection('actionLogs').doc(actionId);
+  const snap = await ref.get();
+  if (!snap.exists || snap.data()?.userId !== userId) return null;
+  const log = snap.data() as ActionExecutionLog;
+  if (log.deviceId !== deviceId) return null;
+  const updated: ActionExecutionLog = {
+    ...log,
+    status,
+    ackPayload,
+    error,
+    completedAt,
+    durationMs: new Date(completedAt).getTime() - new Date(log.startedAt).getTime(),
+  };
+  await ref.set(updated);
+  return updated;
+}
+
+export async function getActionExecutionLogs(userId: string, limit = 20): Promise<ActionExecutionLog[]> {
+  const fs = firestore();
+  if (!fs) {
+    const data = memGet<Record<string, ActionExecutionLog>>(`actionLogs/${userId}`);
+    return data
+      ? Object.values(data)
+        .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
+        .slice(0, limit)
+      : [];
+  }
+  const snap = await fs.collection('actionLogs').where('userId', '==', userId).get();
+  return snap.docs
+    .map((doc) => doc.data() as ActionExecutionLog)
+    .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
+    .slice(0, limit);
 }
 
 export { admin };

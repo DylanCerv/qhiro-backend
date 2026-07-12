@@ -21,6 +21,7 @@ export async function generateAndStoreReport(
     analysis,
     zoneHistory,
   });
+  validatePdfBuffer(buffer);
 
   const storagePath = await uploadReportPdf(userId, reportId, buffer);
 
@@ -93,4 +94,13 @@ function buildPdfReport(input: PdfInput): Promise<Buffer> {
 
     doc.end();
   });
+}
+
+function validatePdfBuffer(buffer: Buffer): void {
+  const header = buffer.subarray(0, 5).toString('utf-8');
+  const trailer = buffer.subarray(Math.max(0, buffer.length - 1024)).toString('latin1');
+
+  if (header !== '%PDF-' || !trailer.includes('%%EOF')) {
+    throw new Error('Generated report is not a valid PDF document.');
+  }
 }
