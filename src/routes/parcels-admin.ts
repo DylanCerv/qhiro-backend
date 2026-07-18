@@ -17,7 +17,7 @@ import {
   updateClientAccountStatus,
   upsertParcel,
 } from '../services/firebase.js';
-import { getMqttStatus, publishMqttDiagnostic, publishTelemetry } from '../services/mqtt.js';
+import { getMqttStatus, publishActionAck, publishMqttDiagnostic, publishTelemetry } from '../services/mqtt.js';
 import type { AccountStatus, Parcel } from '../types/index.js';
 
 const parcelSchema = z.object({
@@ -48,7 +48,7 @@ const mqttDiagnosticSchema = z.object({
 const adminTelemetrySchema = z.object({
   userId: z.string().min(1),
   deviceId: z.string().min(1),
-  deviceType: z.enum(['drone', 'sensor', 'nest']),
+  deviceType: z.enum(['drone', 'sensor', 'nest', 'sentinel']),
   payload: z.record(z.unknown()),
 });
 
@@ -56,6 +56,16 @@ const testFlightSchema = z.object({
   userId: z.string().min(1),
   parcelId: z.string().min(1),
   deviceId: z.string().min(1),
+});
+
+const actionAckSchema = z.object({
+  userId: z.string().min(1),
+  deviceId: z.string().min(1),
+  actionId: z.string().min(1),
+  status: z.enum(['completed', 'failed']),
+  details: z.string().optional(),
+  error: z.string().optional(),
+  missingResource: z.string().optional(),
 });
 
 export const parcelRoutes = new Hono();
@@ -259,6 +269,32 @@ adminRoutes.post('/mqtt/telemetry', async (c) => {
   return c.json({
     published: true,
     topic: `qhiro/users/${userId}/devices/${deviceId}/${deviceType}/telemetry`,
+    mqtt: getMqttStatus(),
+  });
+});
+
+adminRoutes.post('/mqtt/action-ack', async (c) => {
+  const body = await c.req.json();
+  const parsed = actionAckSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ error: 'Invalid action ACK payload', details: parsed.error.flatten() }, 400);
+  }
+
+  const { userId, deviceId, actionId, status, details, error, missingResource } = parsed.data;
+  const payload = {
+    status,
+    finishedAt: new Date().toISOString(),
+    details,
+    error,
+    missingResource,
+    source: 'admin-sentinel-simulator',
+  };
+
+  publishActionAck(userId, deviceId, actionId, payload);
+  return c.json({
+    published: true,
+    topic: `qhiro/users/${userId}/devices/${deviceId}/actions/${actionId}/ack`,
+    payload,
     mqtt: getMqttStatus(),
   });
 });

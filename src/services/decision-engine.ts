@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import type { AiAnalysisResponse, NotificationEvent } from '../types/index.js';
-import { createAlert, saveActionExecutionLog } from './firebase.js';
+import type { AiAnalysisResponse, Device, NotificationEvent } from '../types/index.js';
+import { createAlert, getDevices, saveActionExecutionLog } from './firebase.js';
 import { sendSensorCommand } from './mqtt.js';
 import { sendNotification } from './notifications.js';
 import { generateAndStoreReport } from './reports.js';
@@ -32,8 +32,8 @@ export async function applyDecisionEngine(ctx: DecisionContext): Promise<string[
   if (severity >= 0.6 && severity < 0.8) {
     await notify(userId, parcelId, severity, diagnosis, 'anomalyDetected');
     actions.push('notify:anomalyDetected');
-    const actionId = await triggerInjection(userId, parcelId, zoneId, analysis);
-    actions.push(`mqtt:inject:${actionId}:pending`);
+    const injectionActions = await triggerInjection(userId, parcelId, zoneId, analysis);
+    actions.push(...injectionActions);
     const report = await generateAndStoreReport(userId, parcelId, analysis);
     actions.push(`report:${report.reportId}`);
     return actions;
@@ -42,8 +42,8 @@ export async function applyDecisionEngine(ctx: DecisionContext): Promise<string[
   if (severity >= 0.8) {
     await notify(userId, parcelId, severity, diagnosis, 'emergencyAlert');
     actions.push('notify:emergencyAlert');
-    const actionId = await triggerInjection(userId, parcelId, zoneId, analysis);
-    actions.push(`mqtt:inject:${actionId}:pending`);
+    const injectionActions = await triggerInjection(userId, parcelId, zoneId, analysis);
+    actions.push(...injectionActions);
     const report = await generateAndStoreReport(userId, parcelId, analysis);
     actions.push(`report:${report.reportId}`);
     await scheduleEmergencyRescan(userId, parcelId);
@@ -85,30 +85,75 @@ async function triggerInjection(
   parcelId: string,
   zoneId: string,
   analysis: AiAnalysisResponse,
-): Promise<string> {
-  const sensorId = `sensor_${zoneId}`;
-  const actionId = randomUUID();
-  const commandPayload = {
-    actionId,
-    action: 'inject',
-    parcelId,
-    zoneId,
-    npkFormula: analysis.recommendedNpkFormula,
-    timestamp: new Date().toISOString(),
-  };
+): Promise<string[]> {
+  const targetSentinels = await selectTargetSentinels(userId, parcelId);
+  if (targetSentinels.length === 0) {
+    console.warn(`[DecisionEngine] No sentinel found for parcel ${parcelId}, zone ${zoneId}`);
+    const actionId = randomUUID();
+    const queuedPayload = {
+      actionId,
+      action: 'inject',
+      parcelId,
+      zoneId,
+      affectedCoordinates: analysis.affectedCoordinates ?? [],
+      npkFormula: analysis.recommendedNpkFormula,
+      timestamp: new Date().toISOString(),
+      queuedReason: 'No online sentinel registered for this parcel yet.',
+    };
 
-  await saveActionExecutionLog({
-    actionId,
-    userId,
-    deviceId: sensorId,
-    parcelId,
-    zoneId,
-    action: 'inject',
-    status: 'pending',
-    commandPayload,
-    startedAt: commandPayload.timestamp,
-  });
-  sendSensorCommand(userId, sensorId, commandPayload);
+    await saveActionExecutionLog({
+      actionId,
+      userId,
+      deviceId: `parcel:${parcelId}`,
+      parcelId,
+      zoneId,
+      action: 'inject',
+      status: 'pending',
+      commandPayload: queuedPayload,
+      startedAt: queuedPayload.timestamp,
+      queueReason: 'No online sentinel registered for this parcel yet.',
+    });
+
+    await sendNotification(userId, 'injectionExecuted', {
+      parcelId,
+      zoneId,
+      npkFormula: analysis.recommendedNpkFormula,
+      actionId,
+      status: 'pending',
+      message: 'Acción pendiente de centinela online',
+    });
+
+    return [`mqtt:inject:queued:${actionId}:pending`];
+  }
+
+  const actions: string[] = [];
+  const actionId = randomUUID();
+  for (const sentinel of targetSentinels) {
+    const commandPayload = {
+      actionId: targetSentinels.length === 1 ? actionId : randomUUID(),
+      action: 'inject',
+      parcelId,
+      zoneId: sentinel.zoneId ?? zoneId,
+      affectedCoordinates: analysis.affectedCoordinates ?? [],
+      npkFormula: analysis.recommendedNpkFormula,
+      timestamp: new Date().toISOString(),
+    };
+
+    await saveActionExecutionLog({
+      actionId: commandPayload.actionId,
+      userId,
+      deviceId: sentinel.deviceId,
+      parcelId,
+      zoneId: commandPayload.zoneId,
+      action: 'inject',
+      status: 'pending',
+      commandPayload,
+      startedAt: commandPayload.timestamp,
+    });
+    sendSensorCommand(userId, sentinel.deviceId, commandPayload);
+    actions.push(`mqtt:inject:${sentinel.deviceId}:${commandPayload.actionId}:pending`);
+  }
+
   await sendNotification(userId, 'injectionExecuted', {
     parcelId,
     zoneId,
@@ -116,7 +161,20 @@ async function triggerInjection(
     actionId,
     status: 'pending',
   });
-  return actionId;
+  return actions;
+}
+
+async function selectTargetSentinels(
+  userId: string,
+  parcelId: string,
+): Promise<Device[]> {
+  const devices = await getDevices(userId);
+  const sentinel = devices.find((device) =>
+    device.type === 'sentinel' &&
+    device.status !== 'offline' &&
+    device.parcelId === parcelId,
+  );
+  return sentinel ? [sentinel] : [];
 }
 
 async function scheduleEmergencyRescan(userId: string, parcelId: string): Promise<void> {

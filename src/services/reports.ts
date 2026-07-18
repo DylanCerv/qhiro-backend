@@ -56,33 +56,33 @@ function buildPdfReport(input: PdfInput): Promise<Buffer> {
     doc.on('end', () => resolve(Buffer.concat(chunks)));
     doc.on('error', reject);
 
-    doc.fontSize(20).text('Qhiro Symbiotic — Crop Analysis Report', { align: 'center' });
+    doc.fontSize(20).text('Qhiro Symbiotic — Informe de análisis del cultivo', { align: 'center' });
     doc.moveDown();
-    doc.fontSize(12).text(`Parcel: ${input.parcelName}`);
-    doc.text(`Crop Type: ${input.cropType}`);
-    doc.text(`Generated: ${new Date().toISOString()}`);
+    doc.fontSize(12).text(`Parcela: ${input.parcelName}`);
+    doc.text(`Tipo de cultivo: ${input.cropType}`);
+    doc.text(`Generado: ${new Date().toISOString()}`);
     doc.moveDown();
 
-    doc.fontSize(14).text('AI Diagnosis');
+    doc.fontSize(14).text('Diagnóstico de IA');
     doc.fontSize(11).text(input.analysis.diagnosis);
     doc.moveDown();
 
-    doc.fontSize(14).text('Severity Score');
+    doc.fontSize(14).text('Nivel de severidad');
     doc.fontSize(11).text(String(input.analysis.severity));
     doc.moveDown();
 
-    doc.fontSize(14).text('Recommended NPK Formula');
+    doc.fontSize(14).text('Fórmula NPK recomendada');
     const npk = input.analysis.recommendedNpkFormula;
     doc.fontSize(11).text(`N: ${npk.nitrogen} | P: ${npk.phosphorus} | K: ${npk.potassium}`);
     doc.moveDown();
 
-    doc.fontSize(14).text('Recommended Action');
+    doc.fontSize(14).text('Acción recomendada');
     doc.fontSize(11).text(input.analysis.recommendedAction);
     doc.moveDown();
 
-    doc.fontSize(14).text('Zone History (Last 30 Days)');
+    doc.fontSize(14).text('Historial de zona (últimos 30 días)');
     if (input.zoneHistory.length === 0) {
-      doc.fontSize(11).text('No recent alerts recorded.');
+      doc.fontSize(11).text('No hay alertas recientes registradas.');
     } else {
       for (const entry of input.zoneHistory) {
         doc.fontSize(10).text(`${entry.createdAt} — [${entry.severity}] ${entry.message}`);
@@ -90,7 +90,7 @@ function buildPdfReport(input: PdfInput): Promise<Buffer> {
     }
 
     doc.moveDown();
-    doc.fontSize(10).text('Drone imagery: attached via flight capture pipeline.');
+    doc.fontSize(10).text('Imagen del dron: adjunta mediante el flujo de captura de vuelo.');
 
     doc.end();
   });

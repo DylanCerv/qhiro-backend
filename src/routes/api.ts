@@ -17,10 +17,11 @@ import {
   getReports,
   getSchedules,
   getTelemetryProcessingLogs,
+  saveActionExecutionLog,
   upsertDevice,
   upsertSchedule,
 } from '../services/firebase.js';
-import { publishTelemetry } from '../services/mqtt.js';
+import { publishTelemetry, sendSensorCommand } from '../services/mqtt.js';
 import type { Device, ScheduleType } from '../types/index.js';
 
 const scheduleSchema = z.object({
@@ -34,12 +35,20 @@ const scheduleSchema = z.object({
 
 const deviceSchema = z.object({
   name: z.string().min(2),
-  type: z.enum(['drone', 'sensor', 'nest']),
+  type: z.enum(['drone', 'sensor', 'nest', 'sentinel']),
+  status: z.enum(['online', 'offline', 'lowBattery']).optional(),
+  parcelId: z.string().optional(),
+  zoneId: z.string().optional(),
+}).superRefine((value, ctx) => {
+  if (value.type !== 'sentinel') return;
+  if (!value.parcelId) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['parcelId'], message: 'Sentinel parcelId is required' });
+  }
 });
 
 const telemetryPayloadSchema = z.object({
   deviceId: z.string().min(1),
-  deviceType: z.enum(['drone', 'sensor', 'nest']),
+  deviceType: z.enum(['drone', 'sensor', 'nest', 'sentinel']),
   payload: z.record(z.unknown()),
 });
 
@@ -78,6 +87,118 @@ apiRoutes.get('/action-logs', async (c) => {
   const user = c.get('user');
   const logs = await getActionExecutionLogs(user.uid);
   return c.json({ logs });
+});
+
+apiRoutes.get('/activity', async (c) => {
+  const user = c.get('user');
+  const [flights, reports, alerts, actionLogs, devices, parcels] = await Promise.all([
+    getFlights(user.uid),
+    getReports(user.uid),
+    getAlerts(user.uid),
+    getActionExecutionLogs(user.uid, 100),
+    getDevices(user.uid),
+    getParcels(user.uid),
+  ]);
+
+  const activity = [
+    ...flights.map((flight) => ({
+      kind: 'flight' as const,
+      id: flight.flightId,
+      date: flight.completedAt ?? flight.startedAt ?? flight.scheduledAt,
+      status: flight.status,
+      parcelId: flight.parcelId,
+      flightId: flight.flightId,
+      title: 'Vuelo de dron',
+    })),
+    ...reports.map((report) => ({
+      kind: 'report' as const,
+      id: report.reportId,
+      date: report.createdAt,
+      status: report.severity >= 0.8 ? 'critical' : report.severity >= 0.6 ? 'warning' : 'info',
+      parcelId: report.parcelId,
+      reportId: report.reportId,
+      severity: report.severity,
+      title: 'Informe generado',
+      diagnosis: report.diagnosis,
+    })),
+    ...alerts.map((alert) => ({
+      kind: 'alert' as const,
+      id: alert.alertId,
+      date: alert.createdAt,
+      status: alert.read ? 'read' : 'unread',
+      parcelId: alert.parcelId,
+      alertId: alert.alertId,
+      title: 'Alerta',
+      message: alert.message,
+      severity: alert.severity,
+    })),
+    ...actionLogs.map((action) => ({
+      kind: 'action' as const,
+      id: action.actionId,
+      date: action.completedAt ?? action.startedAt,
+      status: action.status,
+      parcelId: action.parcelId,
+      actionId: action.actionId,
+      deviceId: action.deviceId,
+      title: 'Intervención del centinela',
+      error: action.error,
+      queueReason: action.queueReason,
+      durationMs: action.durationMs,
+    })),
+  ].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+
+  return c.json({ activity, flights, reports, alerts, actionLogs, devices, parcels });
+});
+
+apiRoutes.post('/action-logs/:actionId/retry', async (c) => {
+  const user = c.get('user');
+  const actionId = c.req.param('actionId');
+  const logs = await getActionExecutionLogs(user.uid, 1000);
+  const action = logs.find((item) => item.actionId === actionId);
+
+  if (!action) {
+    return c.json({ error: 'Action not found' }, 404);
+  }
+  if (action.status === 'completed') {
+    return c.json({ error: 'Action already completed' }, 409);
+  }
+
+  const sentinel = (await getDevices(user.uid)).find(
+    (device) =>
+      device.type === 'sentinel' &&
+      device.status !== 'offline' &&
+      device.parcelId === action.parcelId,
+  );
+
+  if (!sentinel) {
+    return c.json({ error: 'No online sentinel available for this parcel' }, 409);
+  }
+
+  const commandPayload = {
+    ...action.commandPayload,
+    actionId: action.actionId,
+    retriedAt: new Date().toISOString(),
+    retryCount: Number(action.commandPayload.retryCount ?? 0) + 1,
+  };
+
+  const updated = {
+    ...action,
+    deviceId: sentinel.deviceId,
+    commandPayload,
+    status: 'pending' as const,
+    queueReason: undefined,
+    error: undefined,
+    startedAt: action.startedAt,
+  };
+
+  await saveActionExecutionLog(updated);
+  sendSensorCommand(user.uid, sentinel.deviceId, commandPayload);
+
+  return c.json({
+    published: true,
+    action: updated,
+    topic: `qhiro/users/${user.uid}/devices/${sentinel.deviceId}/command`,
+  });
 });
 
 apiRoutes.get('/schedules', async (c) => {
@@ -147,14 +268,25 @@ apiRoutes.post('/devices', async (c) => {
     return c.json({ error: 'Invalid device payload', details: parsed.error.flatten() }, 400);
   }
 
+  if (parsed.data.type === 'sentinel') {
+    const existingSentinel = (await getDevices(user.uid)).find(
+      (device) => device.type === 'sentinel' && device.parcelId === parsed.data.parcelId,
+    );
+    if (existingSentinel) {
+      return c.json({ error: 'This parcel already has a registered sentinel.' }, 409);
+    }
+  }
+
   const device: Device = {
     deviceId: randomUUID(),
     userId: user.uid,
     name: parsed.data.name,
     type: parsed.data.type,
-    status: 'offline',
+    status: parsed.data.status ?? 'online',
     batteryLevel: 100,
     lastSeenAt: new Date().toISOString(),
+    parcelId: parsed.data.type === 'sentinel' ? parsed.data.parcelId : undefined,
+    zoneId: parsed.data.type === 'sentinel' ? parsed.data.zoneId : undefined,
   };
 
   await upsertDevice(user.uid, device);
@@ -175,10 +307,49 @@ apiRoutes.put('/devices/:deviceId', async (c) => {
     return c.json({ error: 'Device not found' }, 404);
   }
 
+  if (parsed.data.type === 'sentinel') {
+    const existingSentinel = (await getDevices(user.uid)).find(
+      (device) =>
+        device.type === 'sentinel' &&
+        device.parcelId === parsed.data.parcelId &&
+        device.deviceId !== deviceId,
+    );
+    if (existingSentinel) {
+      return c.json({ error: 'This parcel already has a registered sentinel.' }, 409);
+    }
+  }
+
   const device: Device = {
     ...existing,
     name: parsed.data.name,
     type: parsed.data.type,
+    status: parsed.data.status ?? existing.status,
+    parcelId: parsed.data.type === 'sentinel' ? parsed.data.parcelId : undefined,
+    zoneId: parsed.data.type === 'sentinel' ? parsed.data.zoneId : undefined,
+    lastSeenAt: new Date().toISOString(),
+  };
+
+  await upsertDevice(user.uid, device);
+  return c.json({ device });
+});
+
+apiRoutes.post('/devices/:deviceId/toggle-status', async (c) => {
+  const user = c.get('user');
+  const deviceId = c.req.param('deviceId');
+  const body = await c.req.json().catch(() => ({}));
+  const status = body.status;
+  if (!['online', 'offline', 'lowBattery'].includes(status)) {
+    return c.json({ error: 'Invalid status payload' }, 400);
+  }
+
+  const existing = await getDevice(user.uid, deviceId);
+  if (!existing) {
+    return c.json({ error: 'Device not found' }, 404);
+  }
+
+  const device: Device = {
+    ...existing,
+    status,
     lastSeenAt: new Date().toISOString(),
   };
 

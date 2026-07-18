@@ -9,6 +9,8 @@ const TOPICS = {
   actionAck: 'qhiro/users/+/devices/+/actions/+/ack',
   telemetryFor: (userId: string, deviceId: string, deviceType: Device['type']) =>
     `qhiro/users/${userId}/devices/${deviceId}/${deviceType}/telemetry`,
+  actionAckFor: (userId: string, deviceId: string, actionId: string) =>
+    `qhiro/users/${userId}/devices/${deviceId}/actions/${actionId}/ack`,
   deviceCommand: (userId: string, deviceId: string) =>
     `qhiro/users/${userId}/devices/${deviceId}/command`,
 } as const;
@@ -55,7 +57,7 @@ export function initMqtt(): void {
 
       if (parsedTopic.deviceType === 'drone') {
         await handleDroneTelemetry(parsedTopic, data);
-      } else if (parsedTopic.deviceType === 'sensor') {
+      } else if (parsedTopic.deviceType === 'sensor' || parsedTopic.deviceType === 'sentinel') {
         await handleSensorTelemetry(parsedTopic, data);
       } else if (parsedTopic.deviceType === 'nest') {
         await handleNestTelemetry(parsedTopic, data);
@@ -109,6 +111,15 @@ export function publishTelemetry(
   publish(TOPICS.telemetryFor(userId, deviceId, deviceType), payload);
 }
 
+export function publishActionAck(
+  userId: string,
+  deviceId: string,
+  actionId: string,
+  payload: Record<string, unknown>,
+): void {
+  publish(TOPICS.actionAckFor(userId, deviceId, actionId), payload);
+}
+
 function publish(topic: string, payload: Record<string, unknown>): void {
   if (!client?.connected) {
     console.warn(`[MQTT] Not connected — command queued to log: ${topic}`, payload);
@@ -121,7 +132,7 @@ function publish(topic: string, payload: Record<string, unknown>): void {
 function parseTelemetryTopic(
   topic: string,
 ): { userId: string; deviceId: string; deviceType: Device['type'] } | null {
-  const match = /^qhiro\/users\/([^/]+)\/devices\/([^/]+)\/(drone|sensor|nest)\/telemetry$/.exec(topic);
+  const match = /^qhiro\/users\/([^/]+)\/devices\/([^/]+)\/(drone|sensor|nest|sentinel)\/telemetry$/.exec(topic);
   if (!match) return null;
   return {
     userId: match[1],
@@ -146,7 +157,7 @@ async function handleActionAck(
 ): Promise<void> {
   const status = data.status === 'failed' ? 'failed' : 'completed';
   const error = typeof data.error === 'string' ? data.error : undefined;
-  const updated = await completeActionExecutionLog(topic.userId, topic.actionId, status, {
+  const updated = await completeActionExecutionLog(topic.userId, topic.actionId, topic.deviceId, status, {
     ...data,
     deviceId: topic.deviceId,
   }, error);

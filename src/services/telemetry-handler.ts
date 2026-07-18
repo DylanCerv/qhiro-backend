@@ -88,7 +88,7 @@ export async function handleDroneTelemetry(
     return;
   }
 
-  const { userId, deviceId } = ctx;
+  const { userId, deviceId, deviceType } = ctx;
   const parcelId = String(data.parcelId ?? '');
   const flightId = String(data.flightId ?? '');
   const status = String(data.status ?? '');
@@ -168,7 +168,7 @@ export async function handleSensorTelemetry(
     return;
   }
 
-  const { userId, deviceId } = ctx;
+  const { userId, deviceId, deviceType } = ctx;
   const batteryLevel = Number(data.batteryLevel ?? 100);
 
   if (!userId) return;
@@ -178,7 +178,7 @@ export async function handleSensorTelemetry(
     ...device,
     deviceId,
     userId,
-    type: 'sensor',
+    type: deviceType,
     status,
     batteryLevel,
     lastSeenAt: new Date().toISOString(),

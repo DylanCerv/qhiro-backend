@@ -137,6 +137,10 @@ Si falla:
 
 El backend calcula `durationMs` desde que emitió el comando hasta que recibió el ACK. El frontend solo consulta y muestra estos registros.
 
+Para pruebas sin hardware, el panel admin puede publicar un ACK de centinela. Esa prueba sigue pasando por MQTT: el frontend no cierra el log directamente.
+
+El contrato completo para firmware de Centinela está en `../docs/sentinel-mqtt-contract.md`.
+
 ## Payloads Principales
 
 Estado básico:
@@ -196,6 +200,7 @@ El frontend consume endpoints admin para:
 - Seleccionar dispositivo por nombre, tipo e ID.
 - Publicar telemetría validada por usuario/dispositivo.
 - Consultar logs reales de procesamiento y acciones.
+- Simular ACK de centinela para marcar acciones como completadas o fallidas durante pruebas locales.
 
 Esto sirve para descartar rápido si un problema está en Mosquitto, backend, credenciales, topic o payload.
 

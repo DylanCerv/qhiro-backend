@@ -101,11 +101,13 @@ export interface Alert {
 export interface Device {
   deviceId: string;
   userId: string;
-  type: 'drone' | 'sensor' | 'nest';
+  type: 'drone' | 'sensor' | 'nest' | 'sentinel';
   name: string;
   status: 'online' | 'offline' | 'lowBattery';
   batteryLevel: number;
   lastSeenAt: string;
+  parcelId?: string;
+  zoneId?: string;
 }
 
 export interface Report {
@@ -151,6 +153,7 @@ export interface ActionExecutionLog {
   commandPayload: Record<string, unknown>;
   ackPayload?: Record<string, unknown>;
   error?: string;
+  queueReason?: string;
   startedAt: string;
   completedAt?: string;
   durationMs?: number;
