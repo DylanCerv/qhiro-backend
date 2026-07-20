@@ -1,0 +1,33 @@
+name: Deploy backend to EC2
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy in EC2
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            set -e
+
+            cd /home/ubuntu/qhiro-backend
+
+            git fetch origin
+            git reset --hard origin/main
+
+            npm ci
+            npm run build
+
+            pm2 restart qhiro-backend --update-env
+            pm2 save
+
+            curl --fail http://localhost:3001/api/health
