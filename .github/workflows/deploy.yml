@@ -3,7 +3,7 @@ name: Deploy backend to EC2
 on:
   push:
     branches:
-      - main
+      - master
 
 jobs:
   deploy:
@@ -22,7 +22,7 @@ jobs:
             cd /home/ubuntu/qhiro-backend
 
             git fetch origin
-            git reset --hard origin/main
+            git reset --hard origin/master
 
             npm ci
             npm run build
