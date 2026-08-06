@@ -112,7 +112,7 @@ userRoutes.post('/register', async (c) => {
       email: session.email,
       displayName,
       role: 'client',
-      accountStatus: 'active',
+      accountStatus: 'pending',
       country,
       location,
       createdAt: now,
@@ -120,7 +120,15 @@ userRoutes.post('/register', async (c) => {
     };
     await upsertUserProfile(profile);
 
-    return c.json({ userId: session.uid, email: session.email, token: session.idToken }, 201);
+    return c.json(
+      {
+        userId: session.uid,
+        email: session.email,
+        accountStatus: 'pending',
+        message: 'Registration received. Your account is pending activation.',
+      },
+      201,
+    );
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Registration failed';
     return c.json({ error: message }, 400);

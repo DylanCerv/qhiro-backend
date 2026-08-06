@@ -39,7 +39,7 @@ const parcelSchema = z.object({
 });
 
 const accountStatusSchema = z.object({
-  accountStatus: z.enum(['active', 'suspended', 'disabled']),
+  accountStatus: z.enum(['pending', 'active', 'suspended', 'disabled']),
 });
 
 const mqttDiagnosticSchema = z.object({

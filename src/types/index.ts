@@ -161,7 +161,7 @@ export interface ActionExecutionLog {
 
 export type UserRole = 'admin' | 'client';
 
-export type AccountStatus = 'active' | 'suspended' | 'disabled';
+export type AccountStatus = 'pending' | 'active' | 'suspended' | 'disabled';
 
 export interface UserProfile {
   userId: string;

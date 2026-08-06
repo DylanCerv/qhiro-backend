@@ -44,6 +44,16 @@ export const authMiddleware = createMiddleware(async (c, next) => {
       return c.json({ error: 'User profile not found. Complete registration first.' }, 403);
     }
 
+    if (profile.accountStatus === 'pending') {
+      return c.json(
+        {
+          error:
+            'Tu cuenta está pendiente de activación. Te contactaremos cuando el acceso esté listo.',
+        },
+        403,
+      );
+    }
+
     if (profile.accountStatus === 'disabled') {
       return c.json({ error: 'Account disabled. Contact Qhiro Symbiotic support.' }, 403);
     }
