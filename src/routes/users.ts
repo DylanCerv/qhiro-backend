@@ -70,7 +70,9 @@ userRoutes.post('/login', async (c) => {
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Login failed';
-    return c.json({ error: message }, 401);
+    const isNetworkError =
+      message.includes('No se pudo conectar') || message.includes('fetch failed');
+    return c.json({ error: message }, isNetworkError ? 503 : 401);
   }
 });
 

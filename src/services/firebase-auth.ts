@@ -30,6 +30,35 @@ function mapAuthError(message: string): string {
   return message;
 }
 
+function isTransientNetworkError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  const cause =
+    error instanceof Error && error.cause instanceof Error ? error.cause.message : '';
+  const combined = `${message} ${cause}`;
+  return (
+    combined.includes('fetch failed') ||
+    combined.includes('ECONNRESET') ||
+    combined.includes('ETIMEDOUT') ||
+    combined.includes('ENOTFOUND') ||
+    combined.includes('UND_ERR') ||
+    combined.includes('AbortError') ||
+    combined.includes('TimeoutError')
+  );
+}
+
+function mapNetworkError(error: unknown): Error {
+  if (!isTransientNetworkError(error)) {
+    return error instanceof Error ? error : new Error(String(error));
+  }
+
+  const cause =
+    error instanceof Error && error.cause instanceof Error ? error.cause.message : '';
+  console.error('[Auth] Identity Toolkit request failed:', cause || error);
+  return new Error(
+    'No se pudo conectar con Firebase Authentication. Revisa tu conexión e inténtalo de nuevo.',
+  );
+}
+
 async function identityRequest(
   endpoint: string,
   body: Record<string, unknown>,
@@ -41,35 +70,53 @@ async function identityRequest(
     );
   }
 
-  const response = await fetch(
-    `https://identitytoolkit.googleapis.com/v1/${endpoint}?key=${apiKey}`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    },
-  );
+  let lastError: unknown;
 
-  const data = (await response.json()) as {
-    error?: { message?: string };
-    localId?: string;
-    email?: string;
-    idToken?: string;
-  };
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      const response = await fetch(
+        `https://identitytoolkit.googleapis.com/v1/${endpoint}?key=${apiKey}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(8000),
+        },
+      );
 
-  if (data.error?.message) {
-    throw new Error(mapAuthError(data.error.message));
+      const data = (await response.json()) as {
+        error?: { message?: string };
+        localId?: string;
+        email?: string;
+        idToken?: string;
+      };
+
+      if (data.error?.message) {
+        throw new Error(mapAuthError(data.error.message));
+      }
+
+      if (!data.localId || !data.idToken) {
+        throw new Error('Unexpected Firebase Authentication response.');
+      }
+
+      return {
+        localId: data.localId,
+        email: data.email ?? String(body.email ?? ''),
+        idToken: data.idToken,
+      };
+    } catch (error) {
+      if (error instanceof Error && error.message !== 'fetch failed' && !isTransientNetworkError(error)) {
+        throw error;
+      }
+      lastError = error;
+      if (attempt === 1 && isTransientNetworkError(error)) {
+        continue;
+      }
+      throw mapNetworkError(error);
+    }
   }
 
-  if (!data.localId || !data.idToken) {
-    throw new Error('Unexpected Firebase Authentication response.');
-  }
-
-  return {
-    localId: data.localId,
-    email: data.email ?? String(body.email ?? ''),
-    idToken: data.idToken,
-  };
+  throw mapNetworkError(lastError);
 }
 
 export function isFirebaseAuthConfigured(): boolean {

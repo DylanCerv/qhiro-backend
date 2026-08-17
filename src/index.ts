@@ -1,3 +1,4 @@
+import dns from 'node:dns';
 import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
@@ -9,6 +10,8 @@ import { userRoutes } from './routes/users.js';
 import { initFirebase, seedAdminUser } from './services/firebase.js';
 import { startFlightScheduler, stopFlightScheduler } from './services/flight-scheduler.js';
 import { initMqtt, shutdownMqtt } from './services/mqtt.js';
+
+dns.setDefaultResultOrder('ipv4first');
 
 const app = new Hono();
 
