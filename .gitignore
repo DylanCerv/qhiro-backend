@@ -3,3 +3,4 @@ dist/
 .env
 serviceAccount.json
 priv/
+logs/*.jsonl

@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { authMiddleware } from '../middleware/auth.js';
 import { CROP_TYPES } from '../services/crops.js';
 import { isFirebaseAuthConfigured } from '../services/firebase-auth.js';
+import { ERROR_LOG_FILE } from '../services/error-logger.js';
 import {
   admin,
   deleteSchedule,
@@ -58,6 +59,8 @@ apiRoutes.get('/health', (c) =>
   c.json({
     status: 'ok',
     service: 'qhiro-backend',
+    serverTime: new Date().toISOString(),
+    errorLogFile: ERROR_LOG_FILE,
     authMode:
       admin.apps.length && isFirebaseAuthConfigured()
         ? 'firebase'

@@ -1,5 +1,6 @@
 import { createMiddleware } from 'hono/factory';
-import { getUserProfile, verifyIdToken } from '../services/firebase.js';
+import { logError, tokenDiagnostics } from '../services/error-logger.js';
+import { admin, getUserProfile, verifyIdToken } from '../services/firebase.js';
 import type { AuthenticatedUser } from '../types/index.js';
 
 declare module 'hono' {
@@ -24,7 +25,8 @@ export const tokenMiddleware = createMiddleware(async (c, next) => {
       accountStatus: 'active',
     });
     await next();
-  } catch {
+  } catch (error) {
+    await logAuthFailure(c, 'auth.token', token, error);
     return c.json({ error: 'Invalid authentication token' }, 401);
   }
 });
@@ -36,8 +38,12 @@ export const authMiddleware = createMiddleware(async (c, next) => {
   }
 
   const token = header.slice(7);
+  let uid = '';
+
   try {
     const decoded = await verifyIdToken(token);
+    uid = decoded.uid;
+
     const profile = await getUserProfile(decoded.uid);
 
     if (!profile) {
@@ -72,7 +78,24 @@ export const authMiddleware = createMiddleware(async (c, next) => {
       location: profile.location,
     });
     await next();
-  } catch {
+  } catch (error) {
+    await logAuthFailure(c, uid ? 'auth.profile' : 'auth.verify', token, error);
     return c.json({ error: 'Invalid authentication token' }, 401);
   }
 });
+
+async function logAuthFailure(
+  c: { req: { method: string; path: string } },
+  scope: string,
+  token: string,
+  error: unknown,
+): Promise<void> {
+  await logError(scope, error, {
+    method: c.req.method,
+    path: c.req.path,
+    details: {
+      ...tokenDiagnostics(token),
+      firebaseAdminReady: Boolean(admin.apps.length),
+    },
+  });
+}

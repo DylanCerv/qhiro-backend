@@ -11,6 +11,7 @@ import {
   getUserProfile,
   upsertUserProfile,
 } from '../services/firebase.js';
+import { logError } from '../services/error-logger.js';
 import type { UserProfile } from '../types/index.js';
 
 const registerSchema = z.object({
@@ -72,6 +73,11 @@ userRoutes.post('/login', async (c) => {
     const message = error instanceof Error ? error.message : 'Login failed';
     const isNetworkError =
       message.includes('No se pudo conectar') || message.includes('fetch failed');
+    await logError('auth.login', error, {
+      method: 'POST',
+      path: '/api/users/login',
+      details: { email: parsed.data.email },
+    });
     return c.json({ error: message }, isNetworkError ? 503 : 401);
   }
 });

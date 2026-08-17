@@ -1,7 +1,7 @@
 {
   "watch": ["src", ".env"],
   "ext": "ts,json,env",
-  "ignore": ["dist", "node_modules"],
+  "ignore": ["dist", "node_modules", "logs"],
   "exec": "node --import tsx src/index.ts",
   "signal": "SIGINT",
   "delay": 500
