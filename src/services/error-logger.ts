@@ -72,7 +72,7 @@ export async function logError(
   error: unknown,
   extras: Omit<ErrorLogEntry, 'logId' | 'createdAt' | 'scope' | 'message' | 'code' | 'name'> & {
     details?: Record<string, unknown>;
-  } = {},
+  } = {}, 
 ): Promise<ErrorLogEntry> {
   const serialized = serializeError(error);
   const entry: ErrorLogEntry = {
