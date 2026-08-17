@@ -8,6 +8,7 @@ import { apiRoutes } from './routes/api.js';
 import { adminRoutes, parcelRoutes } from './routes/parcels-admin.js';
 import { userRoutes } from './routes/users.js';
 import { initFirebase, seedAdminUser } from './services/firebase.js';
+import { logError } from './services/error-logger.js';
 import { startFlightScheduler, stopFlightScheduler } from './services/flight-scheduler.js';
 import { initMqtt, shutdownMqtt } from './services/mqtt.js';
 
@@ -38,6 +39,16 @@ seedAdminUser().catch((error) => {
 });
 
 console.log(`[Qhiro Backend] Starting on port ${env.port}`);
+
+logError('server.start', 'Backend started', {
+  details: {
+    port: env.port,
+    pid: process.pid,
+    cwd: process.cwd(),
+  },
+}).catch((error) => {
+  console.error('[ErrorLog] Failed to write startup log:', error);
+});
 
 const server = serve({ fetch: app.fetch, port: env.port });
 

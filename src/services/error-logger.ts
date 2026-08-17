@@ -1,8 +1,11 @@
 import { appendFile, mkdir } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 
-export const ERROR_LOG_FILE = resolve(process.cwd(), 'logs', 'errors.jsonl');
+const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
+export const ERROR_LOG_DIR = resolve(PROJECT_ROOT, 'logs');
+export const ERROR_LOG_FILE = resolve(ERROR_LOG_DIR, 'errors.jsonl');
 
 export interface ErrorLogEntry {
   logId: string;
@@ -85,7 +88,7 @@ export async function logError(
   console.error(`[ErrorLog] ${scope}: ${serialized.code ?? serialized.message}`);
 
   try {
-    await mkdir(resolve(process.cwd(), 'logs'), { recursive: true });
+    await mkdir(ERROR_LOG_DIR, { recursive: true });
     await appendFile(ERROR_LOG_FILE, `${JSON.stringify(entry)}\n`, 'utf8');
   } catch (fileError) {
     console.error(
