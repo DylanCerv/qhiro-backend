@@ -12,6 +12,7 @@ import {
   getAlerts,
   getDevice,
   getDevices,
+  deleteDevice,
   getFlights,
   getParcels,
   getReportPdfBuffer,
@@ -23,7 +24,8 @@ import {
   upsertSchedule,
 } from '../services/firebase.js';
 import { publishTelemetry, sendSensorCommand } from '../services/mqtt.js';
-import type { Device, ScheduleType } from '../types/index.js';
+import type { Device, GeoPoint, Parcel, ScheduleType } from '../types/index.js';
+import { findParcelAtPoint } from '../utils/geo.js';
 
 const scheduleSchema = z.object({
   scheduleId: z.string().optional(),
@@ -34,18 +36,92 @@ const scheduleSchema = z.object({
   enabled: z.boolean(),
 });
 
+const geoPointSchema = z.object({
+  lat: z.number().min(-90).max(90),
+  lng: z.number().min(-180).max(180),
+});
+
 const deviceSchema = z.object({
-  name: z.string().min(2),
-  type: z.enum(['drone', 'sensor', 'nest', 'sentinel']),
+  name: z.string().trim().optional(),
+  type: z.enum(['drone', 'nest', 'sentinel']),
   status: z.enum(['online', 'offline', 'lowBattery']).optional(),
   parcelId: z.string().optional(),
   zoneId: z.string().optional(),
+  coordinates: geoPointSchema.optional(),
+  sentinelLabel: z.string().regex(/^c\d+$/i).optional(),
 }).superRefine((value, ctx) => {
   if (value.type !== 'sentinel') return;
-  if (!value.parcelId) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['parcelId'], message: 'Sentinel parcelId is required' });
+  if (!value.coordinates) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['coordinates'], message: 'Sentinel coordinates are required' });
   }
 });
+
+function getNextSentinelLabel(sentinels: Device[]): string {
+  const used = new Set(
+    sentinels
+      .map((sentinel) => sentinel.sentinelLabel?.toLowerCase())
+      .filter(Boolean),
+  );
+
+  for (let index = 1; index <= 99; index += 1) {
+    const label = `c${index}`;
+    if (!used.has(label)) return label;
+  }
+
+  return `c${sentinels.length + 1}`;
+}
+
+function resolveDeviceName(
+  type: Device['type'],
+  name: string | undefined,
+  sentinelLabel?: string,
+): string {
+  const trimmed = name?.trim();
+  if (trimmed) return trimmed;
+
+  if (type === 'sentinel' && sentinelLabel) {
+    return `Centinela ${sentinelLabel.toLowerCase()}`;
+  }
+  if (type === 'drone') return 'Dron';
+  if (type === 'nest') return 'Nido';
+  return 'Dispositivo';
+}
+
+function findSentinelLabelConflict(
+  devices: Device[],
+  sentinelLabel: string | undefined,
+  excludeDeviceId?: string,
+): Device | undefined {
+  if (!sentinelLabel) return undefined;
+  const normalized = sentinelLabel.toLowerCase();
+  return devices.find(
+    (device) =>
+      device.type === 'sentinel' &&
+      device.deviceId !== excludeDeviceId &&
+      device.sentinelLabel?.toLowerCase() === normalized,
+  );
+}
+
+async function resolveSentinelPlacement(
+  userId: string,
+  coordinates: GeoPoint,
+  parcelId?: string,
+): Promise<{ parcel: Parcel; zoneId?: string } | null> {
+  const parcels = await getParcels(userId);
+  const parcel = parcelId
+    ? parcels.find((item) => item.parcelId === parcelId)
+    : findParcelAtPoint(coordinates, parcels);
+
+  if (!parcel || !isPointInsideParcel(coordinates, parcel)) {
+    return null;
+  }
+
+  return { parcel, zoneId: parcel.zoneId };
+}
+
+function isPointInsideParcel(point: GeoPoint, parcel: Parcel): boolean {
+  return findParcelAtPoint(point, [parcel]) !== undefined;
+}
 
 const telemetryPayloadSchema = z.object({
   deviceId: z.string().min(1),
@@ -272,18 +348,60 @@ apiRoutes.post('/devices', async (c) => {
   }
 
   if (parsed.data.type === 'sentinel') {
-    const existingSentinel = (await getDevices(user.uid)).find(
-      (device) => device.type === 'sentinel' && device.parcelId === parsed.data.parcelId,
+    const placement = await resolveSentinelPlacement(
+      user.uid,
+      parsed.data.coordinates!,
+      parsed.data.parcelId,
     );
-    if (existingSentinel) {
-      return c.json({ error: 'This parcel already has a registered sentinel.' }, 409);
+    if (!placement) {
+      return c.json({ error: 'Coordinates must be inside one of your parcels.' }, 400);
+    }
+
+    const { parcel } = placement;
+    const allDevices = await getDevices(user.uid);
+    const accountSentinels = allDevices.filter((device) => device.type === 'sentinel');
+    const sentinelLabel = parsed.data.sentinelLabel?.toLowerCase() ?? getNextSentinelLabel(accountSentinels);
+    const conflict = findSentinelLabelConflict(allDevices, sentinelLabel);
+    if (conflict) {
+      return c.json({ error: `Sentinel label "${sentinelLabel}" is already used on this account.` }, 409);
+    }
+
+    const device: Device = {
+      deviceId: randomUUID(),
+      userId: user.uid,
+      name: resolveDeviceName(parsed.data.type, parsed.data.name, sentinelLabel),
+      type: parsed.data.type,
+      status: parsed.data.status ?? 'online',
+      batteryLevel: 100,
+      lastSeenAt: new Date().toISOString(),
+      parcelId: parcel.parcelId,
+      zoneId: parsed.data.zoneId ?? parcel.zoneId,
+      coordinates: parsed.data.coordinates,
+      sentinelLabel,
+    };
+
+    await upsertDevice(user.uid, device);
+    return c.json({ device }, 201);
+  }
+
+  if (parsed.data.type === 'drone') {
+    const existingDrone = (await getDevices(user.uid)).find((device) => device.type === 'drone');
+    if (existingDrone) {
+      return c.json({ error: 'This account already has a registered drone.' }, 409);
+    }
+  }
+
+  if (parsed.data.type === 'nest') {
+    const existingNest = (await getDevices(user.uid)).find((device) => device.type === 'nest');
+    if (existingNest) {
+      return c.json({ error: 'This account already has a registered nest.' }, 409);
     }
   }
 
   const device: Device = {
     deviceId: randomUUID(),
     userId: user.uid,
-    name: parsed.data.name,
+    name: resolveDeviceName(parsed.data.type, parsed.data.name),
     type: parsed.data.type,
     status: parsed.data.status ?? 'online',
     batteryLevel: 100,
@@ -311,24 +429,71 @@ apiRoutes.put('/devices/:deviceId', async (c) => {
   }
 
   if (parsed.data.type === 'sentinel') {
-    const existingSentinel = (await getDevices(user.uid)).find(
-      (device) =>
-        device.type === 'sentinel' &&
-        device.parcelId === parsed.data.parcelId &&
-        device.deviceId !== deviceId,
+    const placement = await resolveSentinelPlacement(
+      user.uid,
+      parsed.data.coordinates!,
+      parsed.data.parcelId,
     );
-    if (existingSentinel) {
-      return c.json({ error: 'This parcel already has a registered sentinel.' }, 409);
+    if (!placement) {
+      return c.json({ error: 'Coordinates must be inside one of your parcels.' }, 400);
+    }
+
+    const { parcel } = placement;
+    const allDevices = await getDevices(user.uid);
+    const accountSentinels = allDevices.filter(
+      (device) => device.type === 'sentinel' && device.deviceId !== deviceId,
+    );
+    const sentinelLabel = parsed.data.sentinelLabel?.toLowerCase()
+      ?? existing.sentinelLabel
+      ?? getNextSentinelLabel(accountSentinels);
+    const conflict = findSentinelLabelConflict(allDevices, sentinelLabel, deviceId);
+    if (conflict) {
+      return c.json({ error: `Sentinel label "${sentinelLabel}" is already used on this account.` }, 409);
+    }
+
+    const device: Device = {
+      ...existing,
+      name: resolveDeviceName(parsed.data.type, parsed.data.name, sentinelLabel),
+      type: parsed.data.type,
+      status: parsed.data.status ?? existing.status,
+      parcelId: parcel.parcelId,
+      zoneId: parsed.data.zoneId ?? parcel.zoneId,
+      coordinates: parsed.data.coordinates,
+      sentinelLabel,
+      lastSeenAt: new Date().toISOString(),
+    };
+
+    await upsertDevice(user.uid, device);
+    return c.json({ device });
+  }
+
+  if (parsed.data.type === 'drone' && existing.type !== 'drone') {
+    const existingDrone = (await getDevices(user.uid)).find(
+      (device) => device.type === 'drone' && device.deviceId !== deviceId,
+    );
+    if (existingDrone) {
+      return c.json({ error: 'This account already has a registered drone.' }, 409);
+    }
+  }
+
+  if (parsed.data.type === 'nest' && existing.type !== 'nest') {
+    const existingNest = (await getDevices(user.uid)).find(
+      (device) => device.type === 'nest' && device.deviceId !== deviceId,
+    );
+    if (existingNest) {
+      return c.json({ error: 'This account already has a registered nest.' }, 409);
     }
   }
 
   const device: Device = {
     ...existing,
-    name: parsed.data.name,
+    name: resolveDeviceName(parsed.data.type, parsed.data.name),
     type: parsed.data.type,
     status: parsed.data.status ?? existing.status,
-    parcelId: parsed.data.type === 'sentinel' ? parsed.data.parcelId : undefined,
-    zoneId: parsed.data.type === 'sentinel' ? parsed.data.zoneId : undefined,
+    parcelId: undefined,
+    zoneId: undefined,
+    coordinates: undefined,
+    sentinelLabel: undefined,
     lastSeenAt: new Date().toISOString(),
   };
 
@@ -358,6 +523,22 @@ apiRoutes.post('/devices/:deviceId/toggle-status', async (c) => {
 
   await upsertDevice(user.uid, device);
   return c.json({ device });
+});
+
+apiRoutes.delete('/devices/:deviceId', async (c) => {
+  const user = c.get('user');
+  const deviceId = c.req.param('deviceId');
+  const existing = await getDevice(user.uid, deviceId);
+  if (!existing) {
+    return c.json({ error: 'Device not found' }, 404);
+  }
+
+  const deleted = await deleteDevice(user.uid, deviceId);
+  if (!deleted) {
+    return c.json({ error: 'Device not found' }, 404);
+  }
+
+  return c.json({ success: true });
 });
 
 apiRoutes.post('/simulator/telemetry', async (c) => {

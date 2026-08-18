@@ -108,6 +108,8 @@ export interface Device {
   lastSeenAt: string;
   parcelId?: string;
   zoneId?: string;
+  coordinates?: GeoPoint;
+  sentinelLabel?: string;
 }
 
 export interface Report {

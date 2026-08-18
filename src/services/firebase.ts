@@ -411,6 +411,33 @@ export async function upsertDevice(userId: string, device: Device): Promise<void
   await fs.collection('devices').doc(deviceDocId(userId, device.deviceId)).set({ ...device, userId });
 }
 
+export async function deleteDevice(userId: string, deviceId: string): Promise<boolean> {
+  const fs = firestore();
+  if (!fs) {
+    const existing = memGet<Record<string, Device>>(`devices/${userId}`) ?? {};
+    if (!existing[deviceId]) return false;
+    delete existing[deviceId];
+    memSet(`devices/${userId}`, existing);
+    return true;
+  }
+
+  const scopedRef = fs.collection('devices').doc(deviceDocId(userId, deviceId));
+  const scopedSnap = await scopedRef.get();
+  if (scopedSnap.exists && scopedSnap.data()?.userId === userId) {
+    await scopedRef.delete();
+    return true;
+  }
+
+  const legacyRef = fs.collection('devices').doc(deviceId);
+  const legacySnap = await legacyRef.get();
+  if (legacySnap.exists && legacySnap.data()?.userId === userId) {
+    await legacyRef.delete();
+    return true;
+  }
+
+  return false;
+}
+
 function deviceDocId(userId: string, deviceId: string): string {
   return `${userId}_${deviceId}`;
 }
