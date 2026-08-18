@@ -19,6 +19,7 @@ import {
   upsertParcel,
 } from '../services/firebase.js';
 import { getMqttStatus, publishActionAck, publishMqttDiagnostic, publishTelemetry } from '../services/mqtt.js';
+import { getAiAdminStatus, setAiAdminModel } from '../services/ai-client.js';
 import type { AccountStatus, Parcel } from '../types/index.js';
 
 const parcelSchema = z.object({
@@ -40,6 +41,7 @@ const parcelSchema = z.object({
 
 const accountStatusSchema = z.object({
   accountStatus: z.enum(['pending', 'active', 'suspended', 'disabled']),
+  confirmEmail: z.string().trim().email().optional(),
 });
 
 const mqttDiagnosticSchema = z.object({
@@ -67,6 +69,10 @@ const actionAckSchema = z.object({
   details: z.string().optional(),
   error: z.string().optional(),
   missingResource: z.string().optional(),
+});
+
+const aiModelSchema = z.object({
+  modelId: z.string().min(3).max(80),
 });
 
 function calculateParcelAreaHa(coordinates: Parcel['coordinates']): number {
@@ -203,6 +209,17 @@ adminRoutes.patch('/clients/:userId/account-status', async (c) => {
   const profile = await getUserProfile(userId);
   if (!profile) {
     return c.json({ error: 'Client not found' }, 404);
+  }
+
+  if (parsed.data.accountStatus === 'disabled') {
+    const expectedEmail = profile.email.trim().toLowerCase();
+    const confirmEmail = parsed.data.confirmEmail?.trim().toLowerCase();
+    if (!confirmEmail || confirmEmail !== expectedEmail) {
+      return c.json(
+        { error: 'Escribe el correo exacto del cliente para desactivar la cuenta.' },
+        400,
+      );
+    }
   }
 
   const updated = await updateClientAccountStatus(
@@ -428,4 +445,31 @@ adminRoutes.post('/mqtt/test-drone-flow', async (c) => {
     topic: `qhiro/users/${userId}/devices/${deviceId}/drone/telemetry`,
     mqtt: getMqttStatus(),
   });
+});
+
+adminRoutes.get('/ai', async (c) => {
+  try {
+    const status = await getAiAdminStatus();
+    return c.json(status);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'AI service unavailable';
+    return c.json({ error: message }, 503);
+  }
+});
+
+adminRoutes.put('/ai/model', async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = aiModelSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ error: 'Invalid AI model payload', details: parsed.error.flatten() }, 400);
+  }
+
+  try {
+    const status = await setAiAdminModel(parsed.data.modelId);
+    return c.json(status);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unable to switch AI model';
+    const isUnavailable = message.includes('no está disponible') || message.includes('no está habilitado');
+    return c.json({ error: message }, isUnavailable ? 400 : 503);
+  }
 });

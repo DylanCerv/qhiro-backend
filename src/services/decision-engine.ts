@@ -1,19 +1,21 @@
 import { randomUUID } from 'node:crypto';
-import type { AiAnalysisResponse, Device, NotificationEvent } from '../types/index.js';
+import type { AiAnalysisResponse, Device, GeoPoint, NotificationEvent } from '../types/index.js';
 import { createAlert, getDevices, saveActionExecutionLog } from './firebase.js';
 import { sendSensorCommand } from './mqtt.js';
 import { sendNotification } from './notifications.js';
 import { generateAndStoreReport } from './reports.js';
+import { findNearestSentinel } from '../utils/geo.js';
 
 interface DecisionContext {
   userId: string;
   parcelId: string;
   zoneId: string;
   analysis: AiAnalysisResponse;
+  targetCoordinates?: GeoPoint[];
 }
 
 export async function applyDecisionEngine(ctx: DecisionContext): Promise<string[]> {
-  const { userId, parcelId, zoneId, analysis } = ctx;
+  const { userId, parcelId, zoneId, analysis, targetCoordinates } = ctx;
   const { severity, diagnosis, recommendedAction } = analysis;
   const actions: string[] = [];
 
@@ -32,7 +34,7 @@ export async function applyDecisionEngine(ctx: DecisionContext): Promise<string[
   if (severity >= 0.6 && severity < 0.8) {
     await notify(userId, parcelId, severity, diagnosis, 'anomalyDetected');
     actions.push('notify:anomalyDetected');
-    const injectionActions = await triggerInjection(userId, parcelId, zoneId, analysis);
+    const injectionActions = await triggerInjection(userId, parcelId, zoneId, analysis, targetCoordinates);
     actions.push(...injectionActions);
     const report = await generateAndStoreReport(userId, parcelId, analysis);
     actions.push(`report:${report.reportId}`);
@@ -42,7 +44,7 @@ export async function applyDecisionEngine(ctx: DecisionContext): Promise<string[
   if (severity >= 0.8) {
     await notify(userId, parcelId, severity, diagnosis, 'emergencyAlert');
     actions.push('notify:emergencyAlert');
-    const injectionActions = await triggerInjection(userId, parcelId, zoneId, analysis);
+    const injectionActions = await triggerInjection(userId, parcelId, zoneId, analysis, targetCoordinates);
     actions.push(...injectionActions);
     const report = await generateAndStoreReport(userId, parcelId, analysis);
     actions.push(`report:${report.reportId}`);
@@ -80,13 +82,23 @@ async function notify(
   await sendNotification(userId, event, { parcelId, severity, message });
 }
 
+function resolveActionCoordinates(
+  analysis: AiAnalysisResponse,
+  targetCoordinates?: GeoPoint[],
+): GeoPoint[] {
+  const capturePoint = targetCoordinates?.[0] ?? analysis.affectedCoordinates?.[0];
+  return capturePoint ? [capturePoint] : [];
+}
+
 async function triggerInjection(
   userId: string,
   parcelId: string,
   zoneId: string,
   analysis: AiAnalysisResponse,
+  targetCoordinates?: GeoPoint[],
 ): Promise<string[]> {
-  const targetSentinels = await selectTargetSentinels(userId, parcelId);
+  const actionCoordinates = resolveActionCoordinates(analysis, targetCoordinates);
+  const targetSentinels = await selectTargetSentinels(userId, parcelId, actionCoordinates);
   if (targetSentinels.length === 0) {
     console.warn(`[DecisionEngine] No sentinel found for parcel ${parcelId}, zone ${zoneId}`);
     const actionId = randomUUID();
@@ -95,7 +107,7 @@ async function triggerInjection(
       action: 'inject',
       parcelId,
       zoneId,
-      affectedCoordinates: analysis.affectedCoordinates ?? [],
+      affectedCoordinates: actionCoordinates,
       npkFormula: analysis.recommendedNpkFormula,
       timestamp: new Date().toISOString(),
       queuedReason: 'No online sentinel registered for this parcel yet.',
@@ -127,38 +139,38 @@ async function triggerInjection(
   }
 
   const actions: string[] = [];
-  const actionId = randomUUID();
-  for (const sentinel of targetSentinels) {
-    const commandPayload = {
-      actionId: targetSentinels.length === 1 ? actionId : randomUUID(),
-      action: 'inject',
-      parcelId,
-      zoneId: sentinel.zoneId ?? zoneId,
-      affectedCoordinates: analysis.affectedCoordinates ?? [],
-      npkFormula: analysis.recommendedNpkFormula,
-      timestamp: new Date().toISOString(),
-    };
+  const sentinel = targetSentinels[0];
+  const actionParcelId = sentinel.parcelId ?? parcelId;
+  const commandPayload = {
+    actionId: randomUUID(),
+    action: 'inject',
+    parcelId: actionParcelId,
+    zoneId: sentinel.zoneId ?? zoneId,
+    affectedCoordinates: actionCoordinates,
+    targetCoordinates: sentinel.coordinates ? [sentinel.coordinates] : actionCoordinates,
+    npkFormula: analysis.recommendedNpkFormula,
+    timestamp: new Date().toISOString(),
+  };
 
-    await saveActionExecutionLog({
-      actionId: commandPayload.actionId,
-      userId,
-      deviceId: sentinel.deviceId,
-      parcelId,
-      zoneId: commandPayload.zoneId,
-      action: 'inject',
-      status: 'pending',
-      commandPayload,
-      startedAt: commandPayload.timestamp,
-    });
-    sendSensorCommand(userId, sentinel.deviceId, commandPayload);
-    actions.push(`mqtt:inject:${sentinel.deviceId}:${commandPayload.actionId}:pending`);
-  }
+  await saveActionExecutionLog({
+    actionId: commandPayload.actionId,
+    userId,
+    deviceId: sentinel.deviceId,
+    parcelId: actionParcelId,
+    zoneId: commandPayload.zoneId,
+    action: 'inject',
+    status: 'pending',
+    commandPayload,
+    startedAt: commandPayload.timestamp,
+  });
+  sendSensorCommand(userId, sentinel.deviceId, commandPayload);
+  actions.push(`mqtt:inject:${sentinel.deviceId}:${commandPayload.actionId}:pending`);
 
   await sendNotification(userId, 'injectionExecuted', {
-    parcelId,
-    zoneId,
+    parcelId: actionParcelId,
+    zoneId: commandPayload.zoneId,
     npkFormula: analysis.recommendedNpkFormula,
-    actionId,
+    actionId: commandPayload.actionId,
     status: 'pending',
   });
   return actions;
@@ -167,14 +179,19 @@ async function triggerInjection(
 async function selectTargetSentinels(
   userId: string,
   parcelId: string,
+  targetCoordinates: GeoPoint[] = [],
 ): Promise<Device[]> {
   const devices = await getDevices(userId);
-  const sentinel = devices.find((device) =>
+  const capturePoint = targetCoordinates[0];
+  const nearest = findNearestSentinel(capturePoint, devices);
+  if (nearest) return [nearest];
+
+  const fallback = devices.find((device) =>
     device.type === 'sentinel' &&
     device.status !== 'offline' &&
     device.parcelId === parcelId,
   );
-  return sentinel ? [sentinel] : [];
+  return fallback ? [fallback] : [];
 }
 
 async function scheduleEmergencyRescan(userId: string, parcelId: string): Promise<void> {

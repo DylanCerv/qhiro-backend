@@ -64,6 +64,33 @@ userRoutes.post('/login', async (c) => {
     }
 
     const session = await signInWithPassword(parsed.data.email, parsed.data.password);
+    const profile = await getUserProfile(session.uid);
+
+    if (!profile) {
+      return c.json({ error: 'User profile not found. Complete registration first.' }, 403);
+    }
+
+    if (profile.accountStatus === 'pending') {
+      return c.json(
+        {
+          error:
+            'Tu cuenta está pendiente de activación. Te contactaremos cuando el acceso esté listo.',
+        },
+        403,
+      );
+    }
+
+    if (profile.accountStatus === 'disabled') {
+      return c.json({ error: 'Account disabled. Contact Qhiro Symbiotic support.' }, 403);
+    }
+
+    if (profile.accountStatus === 'suspended') {
+      return c.json(
+        { error: 'Account temporarily suspended. Please resolve billing to continue.' },
+        403,
+      );
+    }
+
     return c.json({
       uid: session.uid,
       email: session.email,
@@ -164,7 +191,7 @@ userRoutes.post('/profile', tokenMiddleware, async (c) => {
     email: parsed.data.email ?? user.email ?? '',
     displayName: parsed.data.displayName,
     role: 'client',
-    accountStatus: 'active',
+    accountStatus: 'pending',
     country: parsed.data.country,
     location: parsed.data.location,
     fcmToken: parsed.data.fcmToken,

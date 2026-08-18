@@ -18,6 +18,7 @@ import {
   upsertParcel,
 } from './firebase.js';
 import { sendNotification } from './notifications.js';
+import { readGeoPoints } from '../utils/geo.js';
 
 interface TelemetryContext {
   userId: string;
@@ -249,6 +250,7 @@ async function runAnalysisPipeline(
   telemetry: Record<string, unknown>,
   startedAt: number,
 ): Promise<void> {
+  const captureCoordinates = readGeoPoints(telemetry.coordinates).slice(0, 1);
   const request: AiAnalysisRequest = {
     parcelId: parcel.parcelId,
     zoneId: parcel.zoneId,
@@ -263,7 +265,7 @@ async function runAnalysisPipeline(
     timestamp: new Date().toISOString(),
     imageUrl: typeof telemetry.imageUrl === 'string' ? telemetry.imageUrl : undefined,
     imageBase64: typeof telemetry.imageBase64 === 'string' ? telemetry.imageBase64 : undefined,
-    coordinates: Array.isArray(telemetry.coordinates) ? telemetry.coordinates as AiAnalysisRequest['coordinates'] : parcel.coordinates,
+    coordinates: captureCoordinates.length ? captureCoordinates : parcel.coordinates,
   };
 
   let analysis: AiAnalysisResponse;
@@ -289,6 +291,9 @@ async function runAnalysisPipeline(
       parcelId: parcel.parcelId,
       zoneId: parcel.zoneId,
       analysis,
+      targetCoordinates: captureCoordinates.length
+        ? captureCoordinates
+        : readGeoPoints(analysis.affectedCoordinates),
     });
     await saveProcessingLog({
       ctx,
