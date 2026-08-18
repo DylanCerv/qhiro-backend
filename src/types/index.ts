@@ -63,14 +63,18 @@ export interface Parcel {
 }
 
 export type ScheduleType = 'routine' | 'inspection' | 'emergency';
+export type RepeatUnit = 'day' | 'week' | 'month';
 
 export interface FlightSchedule {
   scheduleId: string;
   userId: string;
   parcelId: string;
-  scheduleType: ScheduleType;
+  parcelIds: string[];
+  scheduleType?: string;
   startTime: string;
   frequencyDays: number;
+  repeatEvery: number;
+  repeatUnit: RepeatUnit;
   enabled: boolean;
   lastRunAt: string | null;
   nextRunAt: string;

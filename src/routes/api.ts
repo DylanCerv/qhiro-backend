@@ -24,17 +24,43 @@ import {
   upsertSchedule,
 } from '../services/firebase.js';
 import { publishTelemetry, sendSensorCommand } from '../services/mqtt.js';
-import type { Device, GeoPoint, Parcel, ScheduleType } from '../types/index.js';
+import type { Device, GeoPoint, Parcel, RepeatUnit } from '../types/index.js';
 import { findParcelAtPoint } from '../utils/geo.js';
+import { findOverlappingSchedule, getNextOccurrence, resolveRepeat, withComputedNextRun } from '../utils/schedule.js';
 
 const scheduleSchema = z.object({
   scheduleId: z.string().optional(),
-  parcelId: z.string(),
-  scheduleType: z.enum(['routine', 'inspection', 'emergency']).default('routine'),
-  startTime: z.string(),
-  frequencyDays: z.number().min(1),
+  parcelId: z.string().optional(),
+  parcelIds: z.array(z.string().min(1)).optional(),
+  scheduleType: z.string().trim().max(48).optional(),
+  startTime: z.string().min(1),
+  frequencyDays: z.number().min(1).max(365).optional(),
+  repeatEvery: z.number().min(1).max(365).optional(),
+  repeatUnit: z.enum(['day', 'week', 'month']).optional(),
   enabled: z.boolean(),
+}).superRefine((value, ctx) => {
+  const parcelIds = value.parcelIds?.filter(Boolean) ?? [];
+  if (!parcelIds.length && !value.parcelId) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['parcelIds'],
+      message: 'At least one parcel is required',
+    });
+  }
+  if (!value.repeatUnit && !value.frequencyDays && !value.repeatEvery) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['repeatUnit'],
+      message: 'Repeat interval is required',
+    });
+  }
 });
+
+function resolveScheduleParcelIds(parcelIds?: string[], parcelId?: string): string[] {
+  const unique = [...new Set((parcelIds ?? []).filter(Boolean))];
+  if (unique.length) return unique;
+  return parcelId ? [parcelId] : [];
+}
 
 const geoPointSchema = z.object({
   lat: z.number().min(-90).max(90),
@@ -282,7 +308,7 @@ apiRoutes.post('/action-logs/:actionId/retry', async (c) => {
 
 apiRoutes.get('/schedules', async (c) => {
   const user = c.get('user');
-  const schedules = await getSchedules(user.uid);
+  const schedules = (await getSchedules(user.uid)).map((schedule) => withComputedNextRun(schedule));
   return c.json({ schedules });
 });
 
@@ -297,20 +323,53 @@ apiRoutes.put('/schedules', async (c) => {
   const scheduleId = parsed.data.scheduleId ?? randomUUID();
   const existingSchedules = await getSchedules(user.uid);
   const existing = existingSchedules.find((s) => s.scheduleId === scheduleId);
-  const startTimeChanged = Boolean(existing && existing.startTime !== parsed.data.startTime);
+
+  const parcelIds = resolveScheduleParcelIds(parsed.data.parcelIds, parsed.data.parcelId);
+  if (!parcelIds.length) {
+    return c.json({ error: 'Select at least one parcel for the drone route.' }, 400);
+  }
+
+  const startTime = parsed.data.startTime || new Date().toISOString();
+  const repeat = resolveRepeat(
+    parsed.data.repeatEvery,
+    parsed.data.repeatUnit as RepeatUnit | undefined,
+    parsed.data.frequencyDays,
+  );
+
+  const overlap = findOverlappingSchedule(
+    {
+      scheduleId,
+      startTime,
+      repeatEvery: repeat.repeatEvery,
+      repeatUnit: repeat.repeatUnit,
+      frequencyDays: repeat.frequencyDays,
+    },
+    existingSchedules,
+  );
+  if (overlap) {
+    return c.json({
+      error: 'El dron ya tiene una misión ese día a esa hora. Elige otra fecha u otra hora.',
+    }, 409);
+  }
 
   const schedule = {
     scheduleId,
     userId: user.uid,
-    parcelId: parsed.data.parcelId,
-    scheduleType: parsed.data.scheduleType as ScheduleType,
-    startTime: parsed.data.startTime,
-    frequencyDays: parsed.data.frequencyDays,
+    parcelId: parcelIds[0],
+    parcelIds,
+    scheduleType: parsed.data.scheduleType || undefined,
+    startTime,
+    frequencyDays: repeat.frequencyDays,
+    repeatEvery: repeat.repeatEvery,
+    repeatUnit: repeat.repeatUnit,
     enabled: parsed.data.enabled,
     lastRunAt: existing?.lastRunAt ?? null,
-    nextRunAt: existing && parsed.data.scheduleId && !startTimeChanged
-      ? existing.nextRunAt
-      : parsed.data.startTime,
+    nextRunAt: getNextOccurrence(
+      startTime,
+      repeat.repeatEvery,
+      repeat.repeatUnit,
+      repeat.frequencyDays,
+    ).toISOString(),
   };
 
   await upsertSchedule(user.uid, schedule);
@@ -599,6 +658,7 @@ apiRoutes.get('/dashboard', async (c) => {
 
   const nextFlight = schedules
     .filter((s) => s.enabled)
+    .map((schedule) => withComputedNextRun(schedule))
     .sort((a, b) => a.nextRunAt.localeCompare(b.nextRunAt))[0] ?? null;
 
   return c.json({
