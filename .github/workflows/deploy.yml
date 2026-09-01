@@ -21,7 +21,7 @@ jobs:
 
             cd /home/ubuntu/qhiro-backend
 
-            git fetch origin
+            git fetch origin master
             git reset --hard origin/master
 
             npm ci
@@ -30,4 +30,5 @@ jobs:
             pm2 restart qhiro-backend --update-env
             pm2 save
 
+            sleep 3
             curl --fail http://localhost:3001/api/health
