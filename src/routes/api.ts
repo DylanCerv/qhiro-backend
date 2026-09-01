@@ -465,8 +465,6 @@ apiRoutes.post('/devices', async (c) => {
     status: parsed.data.status ?? 'online',
     batteryLevel: 100,
     lastSeenAt: new Date().toISOString(),
-    parcelId: parsed.data.type === 'sentinel' ? parsed.data.parcelId : undefined,
-    zoneId: parsed.data.type === 'sentinel' ? parsed.data.zoneId : undefined,
   };
 
   await upsertDevice(user.uid, device);

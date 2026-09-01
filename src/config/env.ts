@@ -9,7 +9,9 @@ const projectId = process.env.FIREBASE_PROJECT_ID ?? '';
 
 export const env = {
   port: Number(process.env.PORT ?? 3001),
-  corsOrigin: process.env.CORS_ORIGIN ?? 'http://localhost:5173',
+  corsOrigin:
+    process.env.CORS_ORIGIN ??
+    'http://localhost:5173,http://localhost:5174',
   firebaseProjectId: projectId,
   firebaseDatabaseUrl:
     process.env.FIREBASE_DATABASE_URL ||

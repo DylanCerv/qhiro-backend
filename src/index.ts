@@ -6,8 +6,10 @@ import { logger } from 'hono/logger';
 import { env } from './config/env.js';
 import { apiRoutes } from './routes/api.js';
 import { adminRoutes, parcelRoutes } from './routes/parcels-admin.js';
+import { qdeRoutes } from './routes/qde.js';
 import { userRoutes } from './routes/users.js';
 import { initFirebase, seedAdminUser } from './services/firebase.js';
+import { seedQdeProfiles } from './services/qde/firestore-qde.js';
 import { logError } from './services/error-logger.js';
 import { startFlightScheduler, stopFlightScheduler } from './services/flight-scheduler.js';
 import { initMqtt, shutdownMqtt } from './services/mqtt.js';
@@ -20,7 +22,7 @@ app.use('*', logger());
 app.use(
   '*',
   cors({
-    origin: env.corsOrigin,
+    origin: env.corsOrigin.split(',').map((value) => value.trim()),
     allowHeaders: ['Authorization', 'Content-Type'],
   }),
 );
@@ -28,6 +30,7 @@ app.use(
 app.route('/api/users', userRoutes);
 app.route('/api/parcels', parcelRoutes);
 app.route('/api/admin', adminRoutes);
+app.route('/api/qde', qdeRoutes);
 app.route('/api', apiRoutes);
 
 initFirebase();
@@ -36,6 +39,10 @@ startFlightScheduler();
 
 seedAdminUser().catch((error) => {
   console.error('[Seed] Failed to seed admin user:', error);
+});
+
+seedQdeProfiles().catch((error) => {
+  console.error('[QDE] Failed to seed profiles:', error);
 });
 
 console.log(`[Qhiro Backend] Starting on port ${env.port}`);
