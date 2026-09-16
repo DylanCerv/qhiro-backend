@@ -9,7 +9,7 @@ import { adminRoutes, parcelRoutes } from './routes/parcels-admin.js';
 import { qdeRoutes } from './routes/qde.js';
 import { userRoutes } from './routes/users.js';
 import { initFirebase, seedAdminUser } from './services/firebase.js';
-import { seedQdeProfiles } from './services/qde/firestore-qde.js';
+import { seedQdeProfiles, seedDefaultCosts } from './services/qde/firestore-qde.js';
 import { logError } from './services/error-logger.js';
 import { startFlightScheduler, stopFlightScheduler } from './services/flight-scheduler.js';
 import { initMqtt, shutdownMqtt } from './services/mqtt.js';
@@ -43,6 +43,10 @@ seedAdminUser().catch((error) => {
 
 seedQdeProfiles().catch((error) => {
   console.error('[QDE] Failed to seed profiles:', error);
+});
+
+seedDefaultCosts().catch((error) => {
+  console.error('[QDE] Failed to seed default costs:', error);
 });
 
 console.log(`[Qhiro Backend] Starting on port ${env.port}`);

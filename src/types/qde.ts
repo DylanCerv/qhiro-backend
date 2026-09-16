@@ -33,6 +33,21 @@ export interface QdeConstraints {
   minTerminalPressureBar: number;
 }
 
+export interface QdeEnergyConfig {
+  peonEffectiveRadiusM: number;
+  cabecillaEffectiveRadiusM: number;
+  nidoPumpMaxFlowLpm: number;
+  nidoControlRadiusM: number;
+  nidoSupplyVoltageV: number;
+  minVoltageAtSentinelV: number;
+  electricalLossPctPer100m: number;
+  pipePressureLossBarPer100m: number;
+  maxHydraulicReachM: number;
+  maxSentinelsPerNido: number;
+  maxCabecillasPerNido: number;
+  maxPeonesPerNido: number;
+}
+
 export interface QdeTerrainInput {
   name: string;
   grossAreaHa: number;
@@ -53,6 +68,7 @@ export interface QdeVersionInputs {
   crop: QdeCropInput;
   sprayProfile: QdeSprayProfile;
   constraints: QdeConstraints;
+  energy: QdeEnergyConfig;
   costs: QdeCostCatalog;
   notes?: string;
 }
@@ -91,6 +107,23 @@ export interface QdeDeploymentNode {
   role: 'cabecilla' | 'peon' | 'nido' | 'qdn';
   coordinates: GeoPoint;
   sectorId?: string;
+  placementReason: string;
+  distanceFromNidoM?: number;
+  estimatedVoltageV?: number;
+  estimatedPressureBar?: number;
+}
+
+export interface QdeBudgetLine {
+  item: string;
+  quantity: number;
+  unitUsd: number;
+  subtotalUsd: number;
+}
+
+export interface QdeBudgetBreakdown {
+  lines: QdeBudgetLine[];
+  totalUsd: number;
+  costPerUsefulHaUsd: number;
 }
 
 export interface QdeVersionOutput {
@@ -102,18 +135,43 @@ export interface QdeVersionOutput {
   trace: QdeTraceStep[];
   summary: string;
   deploymentNodes: QdeDeploymentNode[];
+  budgetBreakdown: QdeBudgetBreakdown | null;
   hydraulicSummary: {
     sectorCount: number;
     maxSimultaneousHeads: number;
     peakFlowLpm: number;
     terminalPressureBar: number;
   };
+  coverageAnalysis?: {
+    measuredCoveragePct: number;
+    gapCount: number;
+    gapPoints: GeoPoint[];
+    gridSpacingM: number;
+    sentinelCount: number;
+  };
+  energySummary?: {
+    worstDistanceM: number;
+    worstVoltageV: number;
+    nidoControlRadiusM: number;
+    withinRangeCount: number;
+    outOfRangeCount: number;
+    rejectionReasons: string[];
+  };
+}
+
+export interface QdeDefaultConfig {
+  costs: QdeCostCatalog;
+  energy: QdeEnergyConfig;
+  updatedAt?: string;
 }
 
 export interface QdeProject {
   projectId: string;
   userId: string;
+  clientUserId?: string;
+  clientName?: string;
   parcelId?: string;
+  parcelName?: string;
   name: string;
   description?: string;
   status: QdeProjectStatus;

@@ -1,6 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import admin from 'firebase-admin';
 import type {
+  QdeCostCatalog,
+  QdeDefaultConfig,
+  QdeEnergyConfig,
   QdePlanVersion,
   QdeProfileRecord,
   QdeProject,
@@ -8,7 +11,7 @@ import type {
   QdeVersionOutput,
   QdeVersionStatus,
 } from '../../types/qde.js';
-import { montePlataPreset } from './engine.js';
+import { defaultCostCatalog, defaultEnergyConfig, montePlataPreset } from './engine.js';
 
 function firestore() {
   if (!admin.apps.length) return null;
@@ -28,6 +31,15 @@ const memoryStore: {
 const QDE_PROJECTS = 'qde_projects';
 const QDE_VERSIONS = 'versions';
 const QDE_PROFILES = 'qde_profiles';
+const QDE_SETTINGS = 'qde_settings';
+const DEFAULT_COSTS_DOC = 'default_costs';
+const DEFAULT_CONFIG_DOC = 'default_config';
+
+const memoryDefaultCosts: QdeCostCatalog = defaultCostCatalog();
+const memoryDefaultConfig: QdeDefaultConfig = {
+  costs: defaultCostCatalog(),
+  energy: defaultEnergyConfig(),
+};
 
 function versionCollection(projectId: string) {
   const fs = firestore();
@@ -72,6 +84,94 @@ export async function seedQdeProfiles(): Promise<void> {
   }
 }
 
+export async function seedDefaultCosts(): Promise<void> {
+  await seedDefaultConfig();
+}
+
+export async function seedDefaultConfig(): Promise<void> {
+  const config = {
+    costs: defaultCostCatalog(),
+    energy: defaultEnergyConfig(),
+    updatedAt: new Date().toISOString(),
+  };
+  const fs = firestore();
+  if (!fs) {
+    Object.assign(memoryDefaultConfig, config);
+    Object.assign(memoryDefaultCosts, config.costs);
+    return;
+  }
+  await fs.collection(QDE_SETTINGS).doc(DEFAULT_CONFIG_DOC).set(config, { merge: true });
+  await fs
+    .collection(QDE_SETTINGS)
+    .doc(DEFAULT_COSTS_DOC)
+    .set({ ...config.costs, updatedAt: config.updatedAt }, { merge: true });
+}
+
+export async function getDefaultConfig(): Promise<QdeDefaultConfig> {
+  const fs = firestore();
+  if (!fs) {
+    return {
+      costs: { ...memoryDefaultConfig.costs },
+      energy: { ...memoryDefaultConfig.energy },
+      updatedAt: memoryDefaultConfig.updatedAt,
+    };
+  }
+
+  const configSnap = await fs.collection(QDE_SETTINGS).doc(DEFAULT_CONFIG_DOC).get();
+  if (configSnap.exists) {
+    const data = configSnap.data() as Partial<QdeDefaultConfig>;
+    return {
+      costs: { ...defaultCostCatalog(), ...data.costs },
+      energy: { ...defaultEnergyConfig(), ...data.energy },
+      updatedAt: data.updatedAt,
+    };
+  }
+
+  const costsSnap = await fs.collection(QDE_SETTINGS).doc(DEFAULT_COSTS_DOC).get();
+  const legacyCosts = costsSnap.exists
+    ? { ...defaultCostCatalog(), ...(costsSnap.data() as QdeCostCatalog) }
+    : defaultCostCatalog();
+
+  return {
+    costs: legacyCosts,
+    energy: defaultEnergyConfig(legacyCosts ? 12 : 12),
+    updatedAt: costsSnap.exists ? (costsSnap.data()?.updatedAt as string) : undefined,
+  };
+}
+
+export async function saveDefaultConfig(config: QdeDefaultConfig): Promise<QdeDefaultConfig> {
+  const fs = firestore();
+  const normalized: QdeDefaultConfig = {
+    costs: { ...defaultCostCatalog(), ...config.costs },
+    energy: { ...defaultEnergyConfig(config.energy?.peonEffectiveRadiusM), ...config.energy },
+    updatedAt: new Date().toISOString(),
+  };
+
+  if (!fs) {
+    Object.assign(memoryDefaultConfig, normalized);
+    Object.assign(memoryDefaultCosts, normalized.costs);
+    return normalized;
+  }
+
+  await fs.collection(QDE_SETTINGS).doc(DEFAULT_CONFIG_DOC).set(normalized);
+  await fs
+    .collection(QDE_SETTINGS)
+    .doc(DEFAULT_COSTS_DOC)
+    .set({ ...normalized.costs, updatedAt: normalized.updatedAt });
+  return normalized;
+}
+
+export async function getDefaultCosts(): Promise<QdeCostCatalog> {
+  const config = await getDefaultConfig();
+  return config.costs;
+}
+
+export async function saveDefaultCosts(costs: QdeCostCatalog): Promise<QdeCostCatalog> {
+  const current = await getDefaultConfig();
+  const saved = await saveDefaultConfig({ ...current, costs });
+  return saved.costs;
+}
+
 export async function getQdeProfiles(): Promise<QdeProfileRecord[]> {
   const fs = firestore();
   if (!fs) return Object.values(memoryStore.profiles);
@@ -110,13 +210,19 @@ export async function createQdeProject(input: {
   userId: string;
   name: string;
   description?: string;
+  clientUserId?: string;
+  clientName?: string;
   parcelId?: string;
+  parcelName?: string;
 }): Promise<QdeProject> {
   const now = new Date().toISOString();
   const project: QdeProject = {
     projectId: randomUUID(),
     userId: input.userId,
+    clientUserId: input.clientUserId,
+    clientName: input.clientName,
     parcelId: input.parcelId,
+    parcelName: input.parcelName,
     name: input.name,
     description: input.description,
     status: 'draft',
@@ -138,7 +244,9 @@ export async function createQdeProject(input: {
 export async function updateQdeProject(
   userId: string,
   projectId: string,
-  patch: Partial<Pick<QdeProject, 'name' | 'description' | 'status' | 'parcelId'>>,
+  patch: Partial<
+    Pick<QdeProject, 'name' | 'description' | 'status' | 'parcelId' | 'clientUserId' | 'clientName' | 'parcelName'>
+  >,
 ): Promise<QdeProject | null> {
   const existing = await getQdeProject(userId, projectId);
   if (!existing) return null;
