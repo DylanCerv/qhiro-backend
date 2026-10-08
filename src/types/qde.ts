@@ -132,6 +132,7 @@ export interface QdeVersionOutput {
   alternatives: QdeAlternative[];
   selectedAlternativeId: string | null;
   selectedAlternative: QdeAlternative | null;
+  deploymentNodesByAlternative: Record<string, QdeDeploymentNode[]>;
   trace: QdeTraceStep[];
   summary: string;
   deploymentNodes: QdeDeploymentNode[];
